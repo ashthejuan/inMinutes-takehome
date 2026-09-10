@@ -1,0 +1,23 @@
+{
+  "name": "food-order-backend",
+  "version": "1.0.0",
+  "description": "Collaborative food ordering API (Fastify + Socket.io + SQLite)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test ../tests/db.test.js ../tests/api.test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.12.3",
+    "nanoid": "^6.0.1",
+    "socket.io": "^4.8.3",
+    "zod": "^4.6.1"
+  }
+}

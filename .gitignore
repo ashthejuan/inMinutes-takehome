@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+frontend/.dart_tool/
+frontend/build/
+frontend/.flutter-plugins-dependencies
+frontend/.packages
+
+# Local env / DB
+backend/.env
+backend/database.db
+backend/database.db-*
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Flutter
+**/doc/api/
+**/ios/Flutter/.last_build_id
+*.log
+*.pyc
+__pycache__/
+
+.agents/*
+.context/build_plan.md

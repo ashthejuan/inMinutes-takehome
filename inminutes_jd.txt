@@ -1,0 +1,28 @@
+inMinutes is building a 10-minute food delivery platform, connecting customers, kitchens, and delivery operations through a real-time technology stack.
+
+We’re looking for a Full Stack Developer Intern who wants to build and ship real features in a fast-moving startup.
+
+What You’ll Work On
+
+Build and improve our Flutter mobile app.
+Develop backend services using Go and Node.js.
+Build and maintain WebSocket-based real-time systems.
+Implement real-time order and delivery synchronization.
+Build REST APIs and integrate them with the app.
+Debug, optimize, and ship production features.
+What We’re Looking For
+
+Strong programming fundamentals.
+Hands-on experience with Flutter/Dart.
+Knowledge of Go or Node.js.
+Understanding of REST APIs and WebSockets.
+Familiarity with Git/GitHub.
+Someone who enjoys building and solving problems independently.
+Good to Have
+PostgreSQL / Redis
+Docker
+Cloud deployment
+Experience with real-time systems or a published app/project.
+Location: HSR Layout Bengaluru 
+Type: Full-time Internship 
+Duration: 3–6 months
