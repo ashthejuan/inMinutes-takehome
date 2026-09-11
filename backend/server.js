@@ -8,6 +8,8 @@ const { z } = require('zod');
 const { initDb, getDb, getMenuItems } = require('./db');
 const { refreshStockCache } = require('./stock');
 const { getSessionVersion, getCartState, applyMutation } = require('./cart');
+const participants = require('./participants');
+const { performCheckout } = require('./checkout');
 
 const PORT = Number(process.env.PORT) || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:8080';
@@ -104,6 +106,8 @@ async function buildServer(options = {}) {
   });
   // Phase 2: warm the `menu:stock:{itemId}` cache from SQLite.
   refreshStockCache();
+  // Phase 3: fresh process has no live ready-gate state (tests get isolation).
+  participants.clearAll();
 
   const app = Fastify({
     logger: options.logger === undefined ? true : options.logger,
@@ -162,6 +166,13 @@ async function buildServer(options = {}) {
       return reply.code(500).send({ error: 'Failed to create session' });
     }
 
+    // Phase 3: seed live ready-gate view (host starts not-ready).
+    participants.ensureParticipant(id, hostId, {
+      name: hostName,
+      isHost: true,
+      joinedAt: Date.now(),
+    });
+
     return reply.code(201).send({
       id,
       join_code: joinCode,
@@ -215,6 +226,13 @@ async function buildServer(options = {}) {
       return reply.code(500).send({ error: 'Failed to join session' });
     }
 
+    // Phase 3: seed live ready-gate view (joins start not-ready).
+    participants.ensureParticipant(session.id, userId, {
+      name: displayName,
+      isHost: false,
+      joinedAt: Date.now(),
+    });
+
     return reply.send({
       session_id: session.id,
       user_id: userId,
@@ -248,6 +266,30 @@ async function buildServer(options = {}) {
       )
       .all(session.id);
 
+    // Phase 3: overlay live ready flags onto the audit rows so REST clients
+    // see the same gate state as socket clients (PRD §8.2 participants:sync).
+    const liveById = new Map(
+      require('./participants').getParticipants(session.id).map((p) => [p.userId, p])
+    );
+    const enriched = participants.map((row) => {
+      const live = liveById.get(row.user_id);
+      return { ...row, ready: live ? live.ready : false };
+    });
+    // Ephemeral socket-only users (never REST-joined) still count for the gate.
+    for (const live of liveById.values()) {
+      if (!enriched.some((row) => row.user_id === live.userId)) {
+        enriched.push({
+          session_id: session.id,
+          user_id: live.userId,
+          display_name: live.name,
+          is_host: live.isHost ? 1 : 0,
+          joined_at: live.joinedAt,
+          ready: live.ready,
+        });
+      }
+    }
+    const allReady = require('./participants').isAllReady(session.id);
+
     const orders = database
       .prepare(
         `SELECT id, session_id, total_paise, status, created_at
@@ -261,10 +303,14 @@ async function buildServer(options = {}) {
     // reads baseVersion here (or on socket join) for its first mutation.
     return reply.send({
       session,
-      participants,
+      participants: enriched,
       orders,
       cart: getCartState(session.id),
       version: getSessionVersion(session.id),
+      allReady,
+      all_ready: allReady,
+      checkoutAvailable: allReady,
+      checkout_available: allReady,
     });
   });
 
@@ -281,6 +327,14 @@ async function buildServer(options = {}) {
 
   io.on('connection', (socket) => {
     app.log.info({ id: socket.id }, 'socket connected');
+
+    // Phase 3: push the ready-gate view to everyone in the room.
+    const broadcastReady = (sessionId) => {
+      const list = participants.getParticipants(sessionId);
+      const available = participants.isAllReady(sessionId);
+      io.to(sessionId).emit('participants:sync', list);
+      io.to(sessionId).emit('checkout:available', { available });
+    };
 
     // Join a session room; server replies with the current versioned cart
     // so the client has baseVersion for its first mutation (PRD §10.1).
@@ -306,9 +360,70 @@ async function buildServer(options = {}) {
       socket.data.sessionId = session.id;
       const userId = body.userId ?? body.user_id;
       if (userId) socket.data.userId = String(userId);
+      // Phase 3: register live presence (display name + host flag from audit
+      // when available; ephemeral fallback keeps Phase-2-style tests green).
+      if (socket.data.userId) {
+        let name;
+        let isHost = socket.data.userId === session.host_id;
+        try {
+          const row = getDb()
+            .prepare(
+              'SELECT display_name, is_host FROM session_participants WHERE session_id = ? AND user_id = ?'
+            )
+            .get(session.id, socket.data.userId);
+          if (row) {
+            name = row.display_name;
+            isHost = row.is_host === 1;
+          }
+        } catch {
+          // Ephemeral fallback below.
+        }
+        participants.ensureParticipant(session.id, socket.data.userId, {
+          name: name ?? socket.data.userId,
+          isHost,
+          joinedAt: Date.now(),
+        });
+      }
       const state = { version: getSessionVersion(session.id), cart: getCartState(session.id) };
+      const list = participants.getParticipants(session.id);
+      const available = participants.isAllReady(session.id);
       socket.emit('cart:sync', state);
-      if (typeof ack === 'function') ack({ ok: true, ...state });
+      socket.emit('participants:sync', list);
+      socket.emit('checkout:available', { available });
+      io.to(session.id).emit('participants:sync', list);
+      if (typeof ack === 'function') ack({ ok: true, ...state, participants: list, checkoutAvailable: available });
+    });
+
+    // Phase 3: ready toggle → update gate → broadcast (PRD §8.1 user:ready).
+    socket.on('user:ready', (raw, ack) => {
+      const body = raw ?? {};
+      const sessionId = String(
+        body.sessionId ?? body.session_id ?? socket.data.sessionId ?? ''
+      ).trim();
+      const userId = String(body.userId ?? body.user_id ?? socket.data.userId ?? '').trim();
+      const ready = body.ready ?? body.isReady;
+      if (!sessionId || !userId || typeof ready !== 'boolean') {
+        const err = { code: 'INVALID_PAYLOAD', message: 'sessionId, userId and ready:boolean are required' };
+        socket.emit('error', err);
+        if (typeof ack === 'function') ack({ ok: false, ...err });
+        return;
+      }
+      const session = findSession(getDb(), sessionId);
+      if (!session) {
+        const err = { code: 'SESSION_NOT_FOUND', message: 'Session not found' };
+        socket.emit('error', err);
+        if (typeof ack === 'function') ack({ ok: false, ...err });
+        return;
+      }
+      socket.data.sessionId = session.id;
+      socket.data.userId = userId;
+      participants.ensureParticipant(session.id, userId, { joinedAt: Date.now() });
+      participants.setReady(session.id, userId, ready);
+      broadcastReady(session.id);
+      const list = participants.getParticipants(session.id);
+      if (typeof ack === 'function') {
+        ack({ ok: true, participants: list, available: participants.isAllReady(session.id) });
+      }
     });
 
     // Phase 2 OCC: baseVersion match → apply + INCR + broadcast;
@@ -373,6 +488,39 @@ async function buildServer(options = {}) {
     socket.on('cart:add', (raw, ack) => handleCartMutation(raw, ack, { minQty: 1 }));
     socket.on('cart:updateQty', (raw, ack) => handleCartMutation(raw, ack, { minQty: 0 }));
     socket.on('cart:remove', (raw, ack) => handleCartMutation(raw, ack, { removeDefaultsQty: true, minQty: 0 }));
+
+    // Phase 3: host-only checkout behind the all-ready gate (PRD §8.1).
+    socket.on('checkout', (raw, ack) => {
+      const body = raw ?? {};
+      const sessionId = String(
+        body.sessionId ?? body.session_id ?? socket.data.sessionId ?? ''
+      ).trim();
+      const userId = String(body.userId ?? body.user_id ?? socket.data.userId ?? '').trim();
+      if (!sessionId || !userId) {
+        const err = { code: 'INVALID_PAYLOAD', message: 'sessionId and userId are required' };
+        socket.emit('error', err);
+        if (typeof ack === 'function') ack({ ok: false, ...err });
+        return;
+      }
+      const session = findSession(getDb(), sessionId);
+      if (!session) {
+        const err = { code: 'SESSION_NOT_FOUND', message: 'Session not found' };
+        socket.emit('error', err);
+        if (typeof ack === 'function') ack({ ok: false, ...err });
+        return;
+      }
+      const result = performCheckout(session.id, userId);
+      if (result.ok) {
+        io.to(session.id).emit('session:checkout', { orderId: result.orderId, order_id: result.orderId });
+      } else {
+        socket.emit('error', {
+          code: result.code,
+          message: result.message,
+          ...(result.notReady ? { notReady: result.notReady } : {}),
+        });
+      }
+      if (typeof ack === 'function') ack(result);
+    });
 
     socket.on('disconnect', () => {
       app.log.info({ id: socket.id }, 'socket disconnected');

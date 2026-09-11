@@ -16,7 +16,21 @@ class CartScreen extends ConsumerWidget {
     final menuAsync = ref.watch(menuProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Cart')),
+      appBar: AppBar(
+        leading: IconButton(
+          tooltip: 'Back to menu',
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.go('/menu'),
+        ),
+        title: const Text('Cart'),
+        actions: [
+          IconButton(
+            tooltip: 'Home',
+            icon: const Icon(Icons.home_outlined),
+            onPressed: () => context.go('/'),
+          ),
+        ],
+      ),
       body: menuAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (err, _) => Center(child: Text(err.toString())),
@@ -62,12 +76,26 @@ class CartScreen extends ConsumerWidget {
                   separatorBuilder: (_, __) => const Divider(height: 1),
                   itemBuilder: (context, index) {
                     final line = lines[index];
+                    final lineTotal =
+                        '₹${((line.item.pricePaise * line.qty) / 100).toStringAsFixed(0)}';
                     return ListTile(
+                      key: ValueKey(line.item.id),
                       title: Text(line.item.name),
-                      subtitle: Text(line.item.priceLabel),
-                      trailing: Text(
-                        '× ${line.qty}',
-                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      subtitle: Text(
+                        '${line.item.priceLabel} each · $lineTotal total',
+                      ),
+                      trailing: _CartQtyControls(
+                        qty: line.qty,
+                        canIncrement: line.qty < line.item.stock,
+                        onDecrement: () => ref
+                            .read(soloCartProvider.notifier)
+                            .setQty(line.item.id, line.qty - 1),
+                        onIncrement: () {
+                          if (line.qty >= line.item.stock) return;
+                          ref
+                              .read(soloCartProvider.notifier)
+                              .setQty(line.item.id, line.qty + 1);
+                        },
                       ),
                     );
                   },
@@ -107,6 +135,45 @@ class CartScreen extends ConsumerWidget {
           );
         },
       ),
+    );
+  }
+}
+
+/// Stepper for one solo-cart line. Decrementing to 0 removes the line via
+/// `SoloCartNotifier.setQty` (matches menu behaviour). Increment is capped
+/// at live `MenuItem.stock` so the cart can't exceed available inventory.
+class _CartQtyControls extends StatelessWidget {
+  const _CartQtyControls({
+    required this.qty,
+    required this.canIncrement,
+    required this.onDecrement,
+    required this.onIncrement,
+  });
+
+  final int qty;
+  final bool canIncrement;
+  final VoidCallback onDecrement;
+  final VoidCallback onIncrement;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          tooltip: qty == 1 ? 'Remove' : 'Decrease quantity',
+          onPressed: onDecrement,
+          icon: const Icon(Icons.remove, size: 18),
+          visualDensity: VisualDensity.compact,
+        ),
+        Text('$qty', style: const TextStyle(fontWeight: FontWeight.w600)),
+        IconButton(
+          tooltip: 'Increase quantity',
+          onPressed: canIncrement ? onIncrement : null,
+          icon: const Icon(Icons.add, size: 18),
+          visualDensity: VisualDensity.compact,
+        ),
+      ],
     );
   }
 }

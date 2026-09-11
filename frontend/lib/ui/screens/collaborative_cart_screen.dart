@@ -9,20 +9,63 @@ import '../../providers/session_controller.dart';
 import '../../providers/session_provider.dart';
 import '../../theme.dart';
 
-/// Collaborative cart — versioned live cart (Phase 2 OCC).
+/// Collaborative cart — versioned live cart (Phase 2 OCC) + Phase 3
+/// ready-gate checkout: every participant toggles Ready, only the host
+/// can place the order, and only when all are ready (PRD §5.3 #4/#5).
 /// Rows keyed by ValueKey(itemId): conflict merges rebuild only changed
 /// items, preserving scroll position.
-class CollaborativeCartScreen extends ConsumerWidget {
+class CollaborativeCartScreen extends ConsumerStatefulWidget {
   const CollaborativeCartScreen({super.key, required this.sessionId});
 
   final String sessionId;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<CollaborativeCartScreen> createState() =>
+      _CollaborativeCartScreenState();
+}
+
+class _CollaborativeCartScreenState
+    extends ConsumerState<CollaborativeCartScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final controller = ref.read(sessionControllerProvider);
+      controller.onCheckout = (orderId) {
+        if (mounted) context.go('/order/$orderId/success');
+      };
+      controller.onErrorMessage = (code, message) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text('$code: $message')));
+      };
+    });
+  }
+
+  String _formatPaise(int paise) => '₹${(paise / 100).toStringAsFixed(0)}';
+
+  @override
+  Widget build(BuildContext context) {
     final participants = ref.watch(participantsProvider);
     final checkout = ref.watch(checkoutProvider);
     final groupCart = ref.watch(groupCartProvider);
-    final version = ref.watch(sessionProvider.select((s) => s.version));
+    final session = ref.watch(sessionProvider);
+    final version = session.version;
+
+    final subtotal = groupCart.values
+        .fold<int>(0, (sum, line) => sum + line.qty * line.pricePaise);
+
+    Participant? me;
+    for (final p in participants) {
+      if (p.userId == session.userId) {
+        me = p;
+        break;
+      }
+    }
+    final myReady = me?.ready ?? false;
+    final waiting =
+        participants.where((p) => !p.ready).map((p) => p.name).toList();
 
     return Scaffold(
       appBar: AppBar(
@@ -78,7 +121,7 @@ class CollaborativeCartScreen extends ConsumerWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: Text(
-              'Session $sessionId · v$version',
+              'Session ${widget.sessionId} · v$version',
               style: Theme.of(context).textTheme.titleSmall?.copyWith(
                     color: AppTheme.textSecondary,
                   ),
@@ -103,14 +146,54 @@ class CollaborativeCartScreen extends ConsumerWidget {
                     ],
                   ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: Row(
+              children: [
+                Text(
+                  'Subtotal: ${_formatPaise(subtotal)}',
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+                const Spacer(),
+                FilledButton.tonal(
+                  onPressed: () {
+                    ref.read(sessionControllerProvider).setReady(!myReady);
+                  },
+                  child: Text(myReady ? '✓ Ready (tap to undo)' : 'Mark Ready'),
+                ),
+              ],
+            ),
+          ),
+          if (!checkout.allReady && waiting.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                'Waiting for: ${waiting.join(', ')}',
+                style: const TextStyle(
+                  color: AppTheme.textSecondary,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          if (!checkout.isHost)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                'Only the host can place the order.',
+                style: TextStyle(
+                  color: AppTheme.textSecondary,
+                  fontSize: 12,
+                ),
+              ),
+            ),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: checkout.canCheckout
             ? () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Checkout lands in Phase 3')),
-                );
+                ref.read(sessionControllerProvider).checkout();
               }
             : null,
         backgroundColor: checkout.canCheckout ? AppTheme.accent : AppTheme.border,

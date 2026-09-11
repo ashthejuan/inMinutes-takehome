@@ -30,8 +30,38 @@ class SessionSocket {
     });
   }
 
+  void onParticipantsSync(void Function(dynamic payload) handler) {
+    _socket?.on('participants:sync', handler);
+  }
+
+  void onCheckoutAvailable(void Function(dynamic payload) handler) {
+    _socket?.on('checkout:available', handler);
+  }
+
+  void onSessionCheckout(void Function(dynamic payload) handler) {
+    _socket?.on('session:checkout', handler);
+  }
+
   void join(String sessionId, String userId) {
     _socket?.emit('session:join', {'sessionId': sessionId, 'userId': userId});
+  }
+
+  /// Phase 3: ready toggle (PRD §8.1 `user:ready`).
+  void setReady({
+    required String sessionId,
+    required String userId,
+    required bool ready,
+  }) {
+    _socket?.emit('user:ready', {
+      'sessionId': sessionId,
+      'userId': userId,
+      'ready': ready,
+    });
+  }
+
+  /// Phase 3: host-only checkout (PRD §8.1 `checkout`).
+  void checkout({required String sessionId, required String userId}) {
+    _socket?.emit('checkout', {'sessionId': sessionId, 'userId': userId});
   }
 
   void sendMutation({
