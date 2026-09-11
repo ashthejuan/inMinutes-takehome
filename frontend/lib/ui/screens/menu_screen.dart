@@ -87,18 +87,45 @@ class _MenuError extends StatelessWidget {
   }
 }
 
-class _MenuList extends ConsumerWidget {
+class _MenuList extends ConsumerStatefulWidget {
   const _MenuList({required this.items});
 
   final List<MenuItem> items;
 
+  /// Canonical display order: starters → mains → breads → desserts → drinks.
+  /// Unknown categories (if the backend ever adds one) sort after these,
+  /// alphabetically.
+  static const categoryOrder = [
+    'Starters',
+    'Mains',
+    'Breads',
+    'Desserts',
+    'Drinks',
+  ];
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_MenuList> createState() => _MenuListState();
+}
+
+class _MenuListState extends ConsumerState<_MenuList> {
+  /// Collapsed category names. All sections start expanded.
+  final Set<String> _collapsed = {};
+
+  @override
+  Widget build(BuildContext context) {
     final categories = <String, List<MenuItem>>{};
-    for (final item in items) {
+    for (final item in widget.items) {
       categories.putIfAbsent(item.category, () => []).add(item);
     }
-    final categoryNames = categories.keys.toList(growable: false);
+    final categoryNames = categories.keys.toList(growable: false)
+      ..sort((a, b) {
+        final ai = _MenuList.categoryOrder.indexOf(a);
+        final bi = _MenuList.categoryOrder.indexOf(b);
+        if (ai != -1 && bi != -1) return ai.compareTo(bi);
+        if (ai != -1) return -1;
+        if (bi != -1) return 1;
+        return a.compareTo(b);
+      });
 
     return ListView.builder(
       padding: const EdgeInsets.only(bottom: 24),
@@ -106,24 +133,65 @@ class _MenuList extends ConsumerWidget {
       itemBuilder: (context, index) {
         final category = categoryNames[index];
         final categoryItems = categories[category]!;
+        final expanded = !_collapsed.contains(category);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
-              child: Text(
-                category,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
+            InkWell(
+              onTap: () => setState(() {
+                if (expanded) {
+                  _collapsed.add(category);
+                } else {
+                  _collapsed.remove(category);
+                }
+              }),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 20, 8, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        category,
+                        style:
+                            Theme.of(context).textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                      ),
                     ),
+                    Text(
+                      '${categoryItems.length}',
+                      style: const TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 13,
+                      ),
+                    ),
+                    Icon(
+                      expanded
+                          ? Icons.expand_less
+                          : Icons.expand_more,
+                      color: AppTheme.textSecondary,
+                    ),
+                  ],
+                ),
               ),
             ),
             const Divider(height: 1),
-            for (final item in categoryItems)
-              _MenuRow(
-                key: ValueKey(item.id),
-                item: item,
+            AnimatedCrossFade(
+              firstChild: Column(
+                children: [
+                  for (final item in categoryItems)
+                    _MenuRow(
+                      key: ValueKey(item.id),
+                      item: item,
+                    ),
+                ],
               ),
+              secondChild: const SizedBox.shrink(),
+              crossFadeState: expanded
+                  ? CrossFadeState.showFirst
+                  : CrossFadeState.showSecond,
+              duration: const Duration(milliseconds: 200),
+            ),
           ],
         );
       },

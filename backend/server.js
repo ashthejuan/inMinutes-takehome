@@ -6,6 +6,8 @@ const { Server } = require('socket.io');
 const { customAlphabet, nanoid } = require('nanoid');
 const { z } = require('zod');
 const { initDb, getDb, getMenuItems } = require('./db');
+const { refreshStockCache } = require('./stock');
+const { getSessionVersion, getCartState, applyMutation } = require('./cart');
 
 const PORT = Number(process.env.PORT) || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:8080';
@@ -27,6 +29,20 @@ const joinSessionSchema = z.object({
   display_name: displayNameField.optional(),
 });
 
+// Phase 2: cart mutations carry the version the client last saw (PRD §10).
+// Aliases (item_id/base_version/added_by) match the REST snake_case style.
+const cartMutationSchema = z.object({
+  sessionId: z.string().trim().min(1).optional(),
+  session_id: z.string().trim().min(1).optional(),
+  itemId: z.string().trim().min(1).optional(),
+  item_id: z.string().trim().min(1).optional(),
+  qty: z.number().int().optional(),
+  baseVersion: z.number().int().min(0).optional(),
+  base_version: z.number().int().min(0).optional(),
+  addedBy: z.string().trim().min(1).max(50).optional(),
+  added_by: z.string().trim().min(1).max(50).optional(),
+});
+
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
 }
@@ -37,6 +53,23 @@ function normalizeJoinCode(raw) {
 
 function defaultGuestName(userId) {
   return `Guest-${String(userId).slice(0, 4).toUpperCase()}`;
+}
+
+/**
+ * Look up a session by id or join code (Flutter navigates with the code).
+ * @param {import('better-sqlite3').Database} database
+ */
+function findSession(database, rawId) {
+  const raw = String(rawId ?? '').trim();
+  if (!raw) return undefined;
+  return (
+    database
+      .prepare('SELECT id, join_code, host_id, status, created_at, expires_at FROM group_sessions WHERE id = ?')
+      .get(raw) ??
+    database
+      .prepare('SELECT id, join_code, host_id, status, created_at, expires_at FROM group_sessions WHERE join_code = ?')
+      .get(normalizeJoinCode(raw))
+  );
 }
 
 /**
@@ -69,6 +102,8 @@ async function buildServer(options = {}) {
     dbPath: options.dbPath,
     force: Boolean(options.dbPath),
   });
+  // Phase 2: warm the `menu:stock:{itemId}` cache from SQLite.
+  refreshStockCache();
 
   const app = Fastify({
     logger: options.logger === undefined ? true : options.logger,
@@ -195,21 +230,12 @@ async function buildServer(options = {}) {
 
   app.get('/api/sessions/:id/state', async (request, reply) => {
     const database = getDb();
-    const rawId = String(request.params.id ?? '').trim();
-    if (!rawId) {
-      return reply.code(400).send({ error: 'Session id is required' });
-    }
-
-    // Accept either the session id or the 6-char join code for convenience.
-    const session =
-      database
-        .prepare('SELECT id, join_code, host_id, status, created_at, expires_at FROM group_sessions WHERE id = ?')
-        .get(rawId) ??
-      database
-        .prepare('SELECT id, join_code, host_id, status, created_at, expires_at FROM group_sessions WHERE join_code = ?')
-        .get(normalizeJoinCode(rawId));
-
+    const session = findSession(database, request.params.id);
     if (!session) {
+      const rawId = String(request.params.id ?? '').trim();
+      if (!rawId) {
+        return reply.code(400).send({ error: 'Session id is required' });
+      }
       return reply.code(404).send({ error: 'Session not found' });
     }
 
@@ -231,13 +257,14 @@ async function buildServer(options = {}) {
       )
       .all(session.id);
 
-    // Cart lives in ephemeral in-memory state in later phases; Phase 1 is REST-only.
+    // Cart + version are live in-memory state (Phase 2 OCC); the client
+    // reads baseVersion here (or on socket join) for its first mutation.
     return reply.send({
       session,
       participants,
       orders,
-      cart: {},
-      version: 0,
+      cart: getCartState(session.id),
+      version: getSessionVersion(session.id),
     });
   });
 
@@ -254,6 +281,99 @@ async function buildServer(options = {}) {
 
   io.on('connection', (socket) => {
     app.log.info({ id: socket.id }, 'socket connected');
+
+    // Join a session room; server replies with the current versioned cart
+    // so the client has baseVersion for its first mutation (PRD §10.1).
+    socket.on('session:join', (raw, ack) => {
+      const body = raw ?? {};
+      const sessionId = String(
+        body.sessionId ?? body.session_id ?? body.session ?? ''
+      ).trim();
+      if (!sessionId) {
+        const err = { code: 'INVALID_PAYLOAD', message: 'sessionId is required' };
+        socket.emit('error', err);
+        if (typeof ack === 'function') ack({ ok: false, ...err });
+        return;
+      }
+      const session = findSession(getDb(), sessionId);
+      if (!session) {
+        const err = { code: 'SESSION_NOT_FOUND', message: 'Session not found' };
+        socket.emit('error', err);
+        if (typeof ack === 'function') ack({ ok: false, ...err });
+        return;
+      }
+      socket.join(session.id);
+      socket.data.sessionId = session.id;
+      const userId = body.userId ?? body.user_id;
+      if (userId) socket.data.userId = String(userId);
+      const state = { version: getSessionVersion(session.id), cart: getCartState(session.id) };
+      socket.emit('cart:sync', state);
+      if (typeof ack === 'function') ack({ ok: true, ...state });
+    });
+
+    // Phase 2 OCC: baseVersion match → apply + INCR + broadcast;
+    // mismatch → VERSION_CONFLICT with current state for retry.
+    const handleCartMutation = async (raw, ack, numberCheck) => {
+      const parsed = cartMutationSchema.safeParse(raw ?? {});
+      if (!parsed.success) {
+        const err = { code: 'INVALID_PAYLOAD', message: 'Invalid mutation payload' };
+        socket.emit('error', err);
+        if (typeof ack === 'function') ack({ ok: false, ...err });
+        return;
+      }
+      const body = parsed.data;
+      const sessionId = body.sessionId ?? body.session_id ?? socket.data.sessionId;
+      const itemId = body.itemId ?? body.item_id;
+      const baseVersion = body.baseVersion ?? body.base_version;
+      let { qty } = body;
+      if (qty === undefined && numberCheck.removeDefaultsQty) qty = 0;
+      if (!sessionId || !itemId || baseVersion === undefined || qty === undefined) {
+        const err = { code: 'INVALID_PAYLOAD', message: 'sessionId, itemId, qty and baseVersion are required' };
+        socket.emit('error', err);
+        if (typeof ack === 'function') ack({ ok: false, ...err });
+        return;
+      }
+      if (numberCheck.minQty !== undefined && qty < numberCheck.minQty) {
+        const err = { code: 'INVALID_PAYLOAD', message: `qty must be >= ${numberCheck.minQty}` };
+        socket.emit('error', err);
+        if (typeof ack === 'function') ack({ ok: false, ...err });
+        return;
+      }
+      const session = findSession(getDb(), sessionId);
+      if (!session) {
+        const err = { code: 'SESSION_NOT_FOUND', message: 'Session not found' };
+        socket.emit('error', err);
+        if (typeof ack === 'function') ack({ ok: false, ...err });
+        return;
+      }
+      const result = await applyMutation(session.id, {
+        itemId,
+        qty,
+        baseVersion,
+        addedBy: body.addedBy ?? body.added_by ?? socket.data.userId ?? null,
+      });
+      if (result.ok) {
+        io.to(session.id).emit('cart:sync', {
+          version: result.version,
+          cart: result.cart,
+          delta: result.delta,
+        });
+      } else {
+        socket.emit('error', {
+          code: result.code,
+          message: result.message,
+          currentVersion: result.currentVersion,
+          currentState: result.currentState,
+          ...(result.available !== undefined ? { available: result.available } : {}),
+        });
+      }
+      if (typeof ack === 'function') ack(result);
+    };
+
+    socket.on('cart:add', (raw, ack) => handleCartMutation(raw, ack, { minQty: 1 }));
+    socket.on('cart:updateQty', (raw, ack) => handleCartMutation(raw, ack, { minQty: 0 }));
+    socket.on('cart:remove', (raw, ack) => handleCartMutation(raw, ack, { removeDefaultsQty: true, minQty: 0 }));
+
     socket.on('disconnect', () => {
       app.log.info({ id: socket.id }, 'socket disconnected');
     });

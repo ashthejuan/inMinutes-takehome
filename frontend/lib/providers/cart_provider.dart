@@ -52,3 +52,22 @@ final soloCartProvider =
     StateNotifierProvider<SoloCartNotifier, Map<String, int>>((ref) {
   return SoloCartNotifier();
 });
+
+/// Group-session cart. The server is the source of truth: replaced wholesale
+/// on every `cart:sync` / conflict merge (rows keyed by ValueKey(itemId)).
+class GroupCartNotifier extends StateNotifier<Map<String, CartLine>> {
+  GroupCartNotifier() : super(const {});
+
+  void setAll(Map<String, CartLine> next) {
+    state = Map.unmodifiable(next);
+  }
+
+  void clear() {
+    state = const {};
+  }
+}
+
+final groupCartProvider =
+    StateNotifierProvider<GroupCartNotifier, Map<String, CartLine>>((ref) {
+  return GroupCartNotifier();
+});
