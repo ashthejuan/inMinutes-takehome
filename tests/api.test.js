@@ -57,26 +57,94 @@ describe('api', () => {
     assert.ok(sample.category);
   });
 
-  it('session routes return 501 until later phases', async () => {
-    const create = await app.inject({
+  it('POST /api/sessions creates a session with join code', async () => {
+    const res = await app.inject({
       method: 'POST',
       url: '/api/sessions',
       payload: {},
     });
-    assert.equal(create.statusCode, 501);
+    assert.equal(res.statusCode, 201);
 
-    const join = await app.inject({
+    const body = res.json();
+    assert.ok(body.id);
+    assert.ok(body.join_code);
+    assert.equal(body.join_code, body.join_code.toUpperCase());
+    assert.equal(body.join_code.length, 6);
+    assert.equal(body.status, 'active');
+    assert.equal(typeof body.created_at, 'number');
+    assert.ok(body.host_id);
+  });
+
+  it('POST /api/sessions/join validates code and adds participant', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      payload: { display_name: 'Host User' },
+    });
+    const { join_code, id: sessionId } = created.json();
+
+    const joined = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/join',
+      payload: { join_code, display_name: 'Priya' },
+    });
+    assert.equal(joined.statusCode, 200);
+
+    const joinBody = joined.json();
+    assert.equal(joinBody.session_id, sessionId);
+    assert.ok(joinBody.user_id);
+    assert.equal(joinBody.display_name, 'Priya');
+    assert.equal(joinBody.is_host, 0);
+
+    const badCode = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/join',
+      payload: { join_code: 'ZZZZZZ' },
+    });
+    assert.equal(badCode.statusCode, 404);
+
+    const missingCode = await app.inject({
       method: 'POST',
       url: '/api/sessions/join',
       payload: {},
     });
-    assert.equal(join.statusCode, 501);
+    assert.equal(missingCode.statusCode, 400);
+  });
 
-    const state = await app.inject({
-      method: 'GET',
-      url: '/api/sessions/abc/state',
+  it('GET /api/sessions/:id/state returns session + participants', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      payload: {},
     });
-    assert.equal(state.statusCode, 501);
+    const { id: sessionId, join_code } = created.json();
+
+    await app.inject({
+      method: 'POST',
+      url: '/api/sessions/join',
+      payload: { join_code, display_name: 'Rohan' },
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sessions/${sessionId}/state`,
+    });
+    assert.equal(res.statusCode, 200);
+
+    const body = res.json();
+    assert.equal(body.session.id, sessionId);
+    assert.equal(body.session.join_code, join_code);
+    assert.ok(Array.isArray(body.participants));
+    assert.equal(body.participants.length, 2);
+    assert.ok(Array.isArray(body.orders));
+    assert.deepEqual(body.cart, {});
+    assert.equal(body.version, 0);
+
+    const missing = await app.inject({
+      method: 'GET',
+      url: '/api/sessions/does-not-exist/state',
+    });
+    assert.equal(missing.statusCode, 404);
   });
 
   it('attaches socket.io to the HTTP server', () => {
