@@ -10,7 +10,7 @@
  * never grows unboundedly. SQLite audit rows (sessions, participants, orders)
  * remain for history.
  *
- * ponytail: single-replica in-memory cleanup; external store if scaled out.
+ * Note: single-replica in-memory cleanup; external store if scaled out.
  */
 
 // PRD FR-13: 30 min inactivity. Overridable via env for tests/demos.

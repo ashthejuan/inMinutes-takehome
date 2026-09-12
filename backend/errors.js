@@ -5,7 +5,7 @@
  * `{ code, message, ...extra }`. REST keeps the legacy `error` alias so
  * older Flutter builds still render the message.
  *
- * ponytail: single table, no classes.
+ * Note: single table, no classes.
  */
 
 const ERROR_CODES = {

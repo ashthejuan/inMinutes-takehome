@@ -6,7 +6,7 @@
  * joinedAt }` per session. `ready` lives ONLY here (no DB column) and is
  * seeded `false` for every participant known from the DB.
  *
- * ponytail: single-replica in-memory map; external store if scaled out.
+ * Note: single-replica in-memory map; external store if scaled out.
  */
 
 /** @type {Map<string, Map<string, { name: string, ready: boolean, isHost: boolean, joinedAt: number }>>} */

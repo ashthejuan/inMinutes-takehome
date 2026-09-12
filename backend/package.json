@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test ../tests/db.test.js ../tests/api.test.js ../tests/stock.test.js ../tests/cart.test.js ../tests/realtime.test.js ../tests/checkout.test.js ../tests/session_lifecycle.test.js ../tests/session_ttl_touch.test.js ../tests/reconnect.test.js"
+    "test": "node --test ../tests/db.test.js ../tests/api.test.js ../tests/stock.test.js ../tests/cart.test.js ../tests/realtime.test.js ../tests/checkout.test.js ../tests/session_lifecycle.test.js ../tests/session_ttl_touch.test.js ../tests/reconnect.test.js ../tests/phase4.verify.test.js"
   },
   "keywords": [],
   "author": "",

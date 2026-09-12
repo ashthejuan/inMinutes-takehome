@@ -22,7 +22,7 @@
  * loser gets VERSION_CONFLICT). Stock moves run under stock.js's own
  * per-(session,item) lock; lock order is always session → item.
  *
- * ponytail: single-replica in-memory state; external store if scaled out.
+ * Note: single-replica in-memory state; external store if scaled out.
  */
 
 const { reserveStock, releaseStock } = require('./stock');

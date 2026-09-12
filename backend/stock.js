@@ -10,7 +10,7 @@
  * Invariant (PRD §5.3 #2): `available = totalStock - Σreservations`
  * where Σ spans ALL sessions (global stock shared across sessions).
  *
- * ponytail: single-replica in-memory lock; Redis + Lua if horizontally scaled.
+ * Note: single-replica in-memory lock; Redis + Lua if horizontally scaled.
  */
 
 const STOCK_CACHE_PREFIX = 'menu:stock:';
