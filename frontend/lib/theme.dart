@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 
-/// Monochrome base + one calm desaturated blue accent (style_guide.md).
+/// Monochrome base + Stripe Purple accent (style_guide.md).
 class AppTheme {
-  static const Color accent = Color(0xFF4A6FA5);
+  static const Color accent = Color(0xFF635BFF);
   static const Color bg = Color(0xFFF7F7F8);
   static const Color surface = Color(0xFFFFFFFF);
   static const Color border = Color(0xFFE2E2E6);
@@ -34,11 +34,13 @@ class AppTheme {
         centerTitle: false,
       ),
       dividerTheme: const DividerThemeData(color: border, thickness: 1, space: 1),
+      // Finite min width — Size.fromHeight(48) is width=∞ and blows up any
+      // FilledButton/OutlinedButton placed in a Row (group cart ready toggle).
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
           backgroundColor: accent,
           foregroundColor: Colors.white,
-          minimumSize: const Size.fromHeight(48),
+          minimumSize: const Size(64, 48),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
       ),
@@ -46,7 +48,7 @@ class AppTheme {
         style: OutlinedButton.styleFrom(
           foregroundColor: textPrimary,
           side: const BorderSide(color: border),
-          minimumSize: const Size.fromHeight(48),
+          minimumSize: const Size(64, 48),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
       ),

@@ -59,7 +59,9 @@ npm test   # 11 pass (db 5 + api 6)
 ```
 
 ## Deferred
-- Socket.io rooms, `cart:sync`, `participants:sync`, `host:changed`, `error` codes (Phase 1 realtime in build plan, explicitly deferred by request).
+- Socket.io rooms, `cart:sync` / `participants:sync` etc. — landed in later
+  phases; Flutter create/join entry is documented in
+  `context/architecture/flutter-session-entry.md`.
 - Stock reservation mutex, version-conflict retry (Phase 2).
 - Ready gate, host-only checkout, order persistence (Phase 3).
 - Session TTL sweep / host transfer (Phase 4).

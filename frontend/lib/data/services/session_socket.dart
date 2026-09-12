@@ -2,11 +2,16 @@ import 'package:socket_io_client/socket_io_client.dart' as io;
 
 /// Thin Socket.io wrapper for the group-session protocol (PRD §8).
 /// Every cart mutation carries the last-seen version as `baseVersion` (PRD §10).
+///
+/// Handlers are stored and re-attached on [connect] so listeners registered
+/// before the socket exists (Riverpod provider init) still work.
 class SessionSocket {
   SessionSocket({required this.baseUrl});
 
   final String baseUrl;
   io.Socket? _socket;
+
+  final Map<String, void Function(dynamic)> _handlers = {};
 
   bool get isConnected => _socket?.connected ?? false;
 
@@ -14,36 +19,68 @@ class SessionSocket {
     disconnect();
     _socket = io.io(
       baseUrl,
-      io.OptionBuilder().setTransports(['websocket']).build(),
+      io.OptionBuilder().setTransports(['websocket']).disableAutoConnect().build(),
     );
+    for (final entry in _handlers.entries) {
+      _socket!.on(entry.key, entry.value);
+    }
+    _socket!.connect();
+  }
+
+  void _on(String event, void Function(dynamic) handler) {
+    _handlers[event] = handler;
+    _socket?.on(event, handler);
   }
 
   void onCartSync(void Function(Map<String, dynamic> payload) handler) {
-    _socket?.on('cart:sync', (data) {
+    _on('cart:sync', (data) {
       if (data is Map) handler(Map<String, dynamic>.from(data));
     });
   }
 
   void onError(void Function(Map<String, dynamic> payload) handler) {
-    _socket?.on('error', (data) {
+    _on('error', (data) {
       if (data is Map) handler(Map<String, dynamic>.from(data));
     });
   }
 
   void onParticipantsSync(void Function(dynamic payload) handler) {
-    _socket?.on('participants:sync', handler);
+    _on('participants:sync', handler);
   }
 
   void onCheckoutAvailable(void Function(dynamic payload) handler) {
-    _socket?.on('checkout:available', handler);
+    _on('checkout:available', handler);
   }
 
   void onSessionCheckout(void Function(dynamic payload) handler) {
-    _socket?.on('session:checkout', handler);
+    _on('session:checkout', handler);
+  }
+
+  /// Phase 4: host transfer (PRD §5.3 #6) + TTL expiry (PRD §15 #4).
+  void onHostChanged(void Function(dynamic payload) handler) {
+    _on('host:changed', handler);
+  }
+
+  void onSessionExpired(void Function(dynamic payload) handler) {
+    _on('session:expired', handler);
   }
 
   void join(String sessionId, String userId) {
-    _socket?.emit('session:join', {'sessionId': sessionId, 'userId': userId});
+    void emitJoin() {
+      _socket?.emit('session:join', {'sessionId': sessionId, 'userId': userId});
+    }
+
+    if (_socket?.connected == true) {
+      emitJoin();
+      return;
+    }
+    _socket?.once('connect', (_) => emitJoin());
+  }
+
+  /// Phase 4: explicit leave — server detaches presence, transfers host
+  /// when needed, and removes the socket from the room.
+  void leave({required String sessionId, required String userId}) {
+    _socket?.emit('session:leave', {'sessionId': sessionId, 'userId': userId});
   }
 
   /// Phase 3: ready toggle (PRD §8.1 `user:ready`).
@@ -83,6 +120,7 @@ class SessionSocket {
 
   void disconnect() {
     _socket?.disconnect();
+    _socket?.dispose();
     _socket = null;
   }
 }

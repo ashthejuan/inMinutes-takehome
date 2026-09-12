@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../providers/cart_provider.dart';
 import '../../providers/checkout_provider.dart';
+import '../../providers/menu_provider.dart';
 import '../../providers/participants_provider.dart';
 import '../../providers/session_controller.dart';
 import '../../providers/session_provider.dart';
@@ -12,8 +14,8 @@ import '../../theme.dart';
 /// Collaborative cart — versioned live cart (Phase 2 OCC) + Phase 3
 /// ready-gate checkout: every participant toggles Ready, only the host
 /// can place the order, and only when all are ready (PRD §5.3 #4/#5).
-/// Rows keyed by ValueKey(itemId): conflict merges rebuild only changed
-/// items, preserving scroll position.
+/// Rows keyed by ValueKey(lineKey): each adder owns their line; only the
+/// owner gets qty steppers (others see a static × qty).
 class CollaborativeCartScreen extends ConsumerStatefulWidget {
   const CollaborativeCartScreen({super.key, required this.sessionId});
 
@@ -67,10 +69,23 @@ class _CollaborativeCartScreenState
     final waiting =
         participants.where((p) => !p.ready).map((p) => p.name).toList();
 
+    final joinCode = session.joinCode;
+    final hasJoinCode = joinCode != null && joinCode.isNotEmpty;
+
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(
+          tooltip: 'Add items from menu',
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.go('/menu'),
+        ),
         title: const Text('Group Order'),
         actions: [
+          IconButton(
+            tooltip: 'Browse menu',
+            icon: const Icon(Icons.restaurant_menu_outlined),
+            onPressed: () => context.go('/menu'),
+          ),
           PopupMenuButton<String>(
             tooltip: 'Participants',
             itemBuilder: (context) {
@@ -99,6 +114,7 @@ class _CollaborativeCartScreenState
             },
             onSelected: (value) {
               if (value == 'leave') {
+                ref.read(sessionControllerProvider).leave();
                 context.go('/');
               }
             },
@@ -120,19 +136,63 @@ class _CollaborativeCartScreenState
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-            child: Text(
-              'Session ${widget.sessionId} · v$version',
-              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                    color: AppTheme.textSecondary,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    hasJoinCode
+                        ? 'Code $joinCode · v$version'
+                        : 'Session ${widget.sessionId} · v$version',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: AppTheme.textSecondary,
+                        ),
                   ),
+                ),
+                if (hasJoinCode)
+                  TextButton.icon(
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: joinCode));
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context)
+                        ..hideCurrentSnackBar()
+                        ..showSnackBar(
+                          const SnackBar(content: Text('Join code copied')),
+                        );
+                    },
+                    icon: const Icon(Icons.copy, size: 16),
+                    label: const Text('Copy'),
+                  ),
+              ],
             ),
           ),
           Expanded(
             child: groupCart.isEmpty
-                ? const Center(
-                    child: Text(
-                      'Cart is empty — add items from the menu.',
-                      style: TextStyle(color: AppTheme.textSecondary),
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text(
+                            'Cart is empty',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 16,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Share the join code, then add items from the menu.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: AppTheme.textSecondary),
+                          ),
+                          const SizedBox(height: 16),
+                          FilledButton(
+                            onPressed: () => context.go('/menu'),
+                            child: const Text('Browse menu'),
+                          ),
+                        ],
+                      ),
                     ),
                   )
                 : ListView(
@@ -140,23 +200,51 @@ class _CollaborativeCartScreenState
                     children: [
                       for (final line in groupCart.values)
                         _GroupCartRow(
-                          key: ValueKey(line.itemId),
+                          key: ValueKey(line.lineKey),
                           line: line,
                         ),
                     ],
                   ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
             child: Row(
               children: [
-                Text(
-                  'Subtotal: ${_formatPaise(subtotal)}',
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w700,
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Subtotal: ${_formatPaise(subtotal)}',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
                       ),
+                      if (!checkout.allReady && waiting.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            'Waiting for: ${waiting.join(', ')}',
+                            style: const TextStyle(
+                              color: AppTheme.textSecondary,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      if (!checkout.isHost)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 4),
+                          child: Text(
+                            'Only the host can place the order.',
+                            style: TextStyle(
+                              color: AppTheme.textSecondary,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
-                const Spacer(),
                 FilledButton.tonal(
                   onPressed: () {
                     ref.read(sessionControllerProvider).setReady(!myReady);
@@ -166,48 +254,32 @@ class _CollaborativeCartScreenState
               ],
             ),
           ),
-          if (!checkout.allReady && waiting.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Text(
-                'Waiting for: ${waiting.join(', ')}',
-                style: const TextStyle(
-                  color: AppTheme.textSecondary,
-                  fontSize: 12,
+          SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: checkout.canCheckout
+                      ? () {
+                          ref.read(sessionControllerProvider).checkout();
+                        }
+                      : null,
+                  icon: const Icon(Icons.check, size: 18),
+                  label: const Text('Place Order'),
                 ),
               ),
             ),
-          if (!checkout.isHost)
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Text(
-                'Only the host can place the order.',
-                style: TextStyle(
-                  color: AppTheme.textSecondary,
-                  fontSize: 12,
-                ),
-              ),
-            ),
+          ),
         ],
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: checkout.canCheckout
-            ? () {
-                ref.read(sessionControllerProvider).checkout();
-              }
-            : null,
-        backgroundColor: checkout.canCheckout ? AppTheme.accent : AppTheme.border,
-        foregroundColor:
-            checkout.canCheckout ? Colors.white : AppTheme.textSecondary,
-        label: const Text('Place Order'),
-        icon: const Icon(Icons.check),
       ),
     );
   }
 }
 
-/// One group-cart line: attribution badge (display only) + qty stepper.
-/// `key: ValueKey(itemId)` preserves scroll when a conflict merge rebuilds
+/// One group-cart line: attribution + qty stepper (owner only).
+/// `key: ValueKey(lineKey)` preserves scroll when a conflict merge rebuilds
 /// only the changed rows.
 class _GroupCartRow extends ConsumerWidget {
   const _GroupCartRow({super.key, required this.line});
@@ -216,11 +288,14 @@ class _GroupCartRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final session = ref.watch(sessionProvider);
+    final isMine = line.addedBy != null && line.addedBy == session.userId;
+
     void setQty(int qty) {
+      if (!isMine) return;
       ref.read(sessionControllerProvider).mutate(line.itemId, qty);
     }
 
-    // Attribution is display-only: resolve the adder's name when known.
     final participants = ref.watch(participantsProvider);
     String? adderName;
     for (final p in participants) {
@@ -231,6 +306,17 @@ class _GroupCartRow extends ConsumerWidget {
     }
     final adderLabel = adderName ?? line.addedBy;
     final hasAttribution = adderLabel != null && adderLabel.isNotEmpty;
+
+    final menu = ref.watch(menuProvider).valueOrNull;
+    String? itemName;
+    if (menu != null) {
+      for (final m in menu) {
+        if (m.id == line.itemId) {
+          itemName = m.name;
+          break;
+        }
+      }
+    }
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -257,7 +343,7 @@ class _GroupCartRow extends ConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  line.itemId,
+                  itemName ?? line.itemId,
                   style: Theme.of(context).textTheme.titleSmall?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
@@ -276,18 +362,27 @@ class _GroupCartRow extends ConsumerWidget {
               ],
             ),
           ),
-          IconButton(
-            onPressed: () => setQty(line.qty - 1),
-            icon: const Icon(Icons.remove, size: 18),
-            visualDensity: VisualDensity.compact,
-          ),
-          Text('${line.qty}',
-              style: const TextStyle(fontWeight: FontWeight.w600)),
-          IconButton(
-            onPressed: () => setQty(line.qty + 1),
-            icon: const Icon(Icons.add, size: 18),
-            visualDensity: VisualDensity.compact,
-          ),
+          if (isMine) ...[
+            IconButton(
+              onPressed: () => setQty(line.qty - 1),
+              icon: const Icon(Icons.remove, size: 18),
+              visualDensity: VisualDensity.compact,
+            ),
+            Text('${line.qty}',
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+            IconButton(
+              onPressed: () => setQty(line.qty + 1),
+              icon: const Icon(Icons.add, size: 18),
+              visualDensity: VisualDensity.compact,
+            ),
+          ] else
+            Text(
+              '× ${line.qty}',
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+                color: AppTheme.textSecondary,
+              ),
+            ),
         ],
       ),
     );

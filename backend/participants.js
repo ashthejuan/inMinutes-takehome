@@ -125,6 +125,81 @@ function clearAll() {
   liveParticipants.clear();
 }
 
+/**
+ * Phase 4 — remove one participant's live entry (socket leave/disconnect).
+ * @returns the removed entry, or null when absent.
+ */
+function removeParticipant(sessionId, userId) {
+  const perSession = liveParticipants.get(sessionId);
+  if (!perSession) return null;
+  const entry = perSession.get(userId) ?? null;
+  if (entry) perSession.delete(userId);
+  return entry;
+}
+
+/** Current host's userId from the live view (null when none). */
+function getHostId(sessionId) {
+  const perSession = liveParticipants.get(sessionId);
+  if (!perSession) return null;
+  for (const [userId, p] of perSession) {
+    if (p.isHost) return userId;
+  }
+  return null;
+}
+
+/**
+ * Phase 4 — set a new host in the live view (demotes the previous host).
+ * @returns {{ oldHostId: string | null, hostId: string | null }}
+ */
+function setHost(sessionId, newHostId) {
+  const perSession = seedFromDb(sessionId);
+  let oldHostId = null;
+  for (const [userId, p] of perSession) {
+    if (p.isHost) oldHostId = userId;
+    p.isHost = userId === newHostId;
+  }
+  const entry = perSession.get(newHostId);
+  if (!entry) return { oldHostId, hostId: null };
+  return { oldHostId, hostId: newHostId };
+}
+
+/**
+ * Phase 4 — host transfer on disconnect (PRD §5.3 #6, FR-10).
+ * Oldest (earliest `joinedAt`) remaining participant becomes host.
+ * @param {string} sessionId
+ * @param {Iterable<string>} [connectedIds] — when given, only these users
+ *   are eligible (socket-connected set); otherwise every live participant.
+ * @returns {{ transferred: boolean, hostId: string | null, previousHostId: string | null }}
+ */
+function transferHost(sessionId, connectedIds) {
+  const perSession = seedFromDb(sessionId);
+  const connected = connectedIds ? new Set(connectedIds) : null;
+
+  let currentHostId = null;
+  for (const [userId, p] of perSession) {
+    if (p.isHost) {
+      currentHostId = userId;
+      break;
+    }
+  }
+  // Current host still present (and still connected) — nothing to do.
+  if (currentHostId && perSession.has(currentHostId) && (!connected || connected.has(currentHostId))) {
+    return { transferred: false, hostId: currentHostId, previousHostId: null };
+  }
+
+  const candidates = [...perSession.entries()]
+    .filter(([userId]) => userId !== currentHostId && (!connected || connected.has(userId)))
+    .sort((a, b) => a[1].joinedAt - b[1].joinedAt);
+  if (candidates.length === 0) {
+    return { transferred: false, hostId: null, previousHostId: currentHostId };
+  }
+  const [newHostId] = candidates[0];
+  for (const [userId, p] of perSession) {
+    p.isHost = userId === newHostId;
+  }
+  return { transferred: true, hostId: newHostId, previousHostId: currentHostId };
+}
+
 module.exports = {
   ensureParticipant,
   setReady,
@@ -133,4 +208,8 @@ module.exports = {
   notReadyList,
   removeSession,
   clearAll,
+  removeParticipant,
+  getHostId,
+  setHost,
+  transferHost,
 };

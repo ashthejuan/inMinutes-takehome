@@ -1,19 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../providers/menu_provider.dart';
+import '../../providers/session_controller.dart';
 import '../../theme.dart';
 
-class JoinGroupScreen extends StatefulWidget {
+class JoinGroupScreen extends ConsumerStatefulWidget {
   const JoinGroupScreen({super.key});
 
   @override
-  State<JoinGroupScreen> createState() => _JoinGroupScreenState();
+  ConsumerState<JoinGroupScreen> createState() => _JoinGroupScreenState();
 }
 
-class _JoinGroupScreenState extends State<JoinGroupScreen> {
+class _JoinGroupScreenState extends ConsumerState<JoinGroupScreen> {
   final _codeController = TextEditingController();
   final _nameController = TextEditingController();
+  bool _joining = false;
 
   @override
   void dispose() {
@@ -22,7 +26,7 @@ class _JoinGroupScreenState extends State<JoinGroupScreen> {
     super.dispose();
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     final code = _codeController.text.trim().toUpperCase();
     final name = _nameController.text.trim();
     if (code.length != 6 || name.isEmpty) {
@@ -33,14 +37,56 @@ class _JoinGroupScreenState extends State<JoinGroupScreen> {
       );
       return;
     }
-    // Join API + socket room land in Phase 1. Navigate with placeholder id.
-    context.go('/group/$code');
+    if (_joining) return;
+    setState(() => _joining = true);
+    try {
+      final joined = await ref.read(apiClientProvider).joinSession(
+            joinCode: code,
+            displayName: name,
+          );
+      final sessionId =
+          (joined['sessionId'] ?? joined['session_id'])?.toString() ?? '';
+      final userId =
+          (joined['userId'] ?? joined['user_id'])?.toString() ?? '';
+      final joinCode =
+          (joined['joinCode'] ?? joined['join_code'] ?? code)?.toString() ??
+              code;
+      final displayName =
+          (joined['displayName'] ?? joined['display_name'] ?? name)
+                  ?.toString() ??
+              name;
+      if (sessionId.isEmpty || userId.isEmpty) {
+        throw Exception('Join response missing ids');
+      }
+      ref.read(sessionControllerProvider).enterSession(
+            sessionId: sessionId,
+            userId: userId,
+            joinCode: joinCode,
+            displayName: displayName,
+          );
+      if (!mounted) return;
+      context.go('/group/$sessionId');
+    } catch (err) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('$err')));
+    } finally {
+      if (mounted) setState(() => _joining = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Join Group Order')),
+      appBar: AppBar(
+        leading: IconButton(
+          tooltip: 'Back to home',
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.go('/'),
+        ),
+        title: const Text('Join Group Order'),
+      ),
       body: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
@@ -57,6 +103,7 @@ class _JoinGroupScreenState extends State<JoinGroupScreen> {
               controller: _codeController,
               textCapitalization: TextCapitalization.characters,
               maxLength: 6,
+              enabled: !_joining,
               inputFormatters: [
                 FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
               ],
@@ -70,6 +117,7 @@ class _JoinGroupScreenState extends State<JoinGroupScreen> {
             TextField(
               controller: _nameController,
               textCapitalization: TextCapitalization.words,
+              enabled: !_joining,
               decoration: const InputDecoration(
                 labelText: 'Display name',
                 border: OutlineInputBorder(),
@@ -77,8 +125,14 @@ class _JoinGroupScreenState extends State<JoinGroupScreen> {
             ),
             const Spacer(),
             FilledButton(
-              onPressed: _submit,
-              child: const Text('Join session'),
+              onPressed: _joining ? null : _submit,
+              child: _joining
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Join session'),
             ),
           ],
         ),

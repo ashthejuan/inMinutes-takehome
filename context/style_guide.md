@@ -1,6 +1,6 @@
 Design direction: clean, minimal, professional, functional — not decorative. This is a real product, not a portfolio piece.
 
-Palette: monochrome grayscale/dark base with exactly one accent color — a calm, desaturated blue — used sparingly for primary actions, active states, and key data points only. No secondary colors, no gradients.
+Palette: monochrome grayscale/dark base with exactly one accent color — Stripe Purple (`#635BFF`) — used sparingly for primary actions, active states, and key data points only. No secondary colors. Exception: the home screen uses a single purple→transparent gradient semicircle behind the centered hero copy.
 
 Typography: one typeface family, clear hierarchy through weight and size, not color. Generous whitespace over dense packing.
 

@@ -80,7 +80,7 @@ describe('concurrent edits over sockets', () => {
     }
   });
 
-  it('two clients editing the same line: last writer wins, loser conflicts and retries', async () => {
+  it('two clients adding the same item: conflict then both own separate lines', async () => {
     const created = await app.inject({ method: 'POST', url: '/api/sessions', payload: {} });
     const { id: sessionId } = created.json();
 
@@ -88,7 +88,6 @@ describe('concurrent edits over sockets', () => {
     const clientB = await connectClient(url);
     clients.push(clientA, clientB);
 
-    // Both clients read the initial versioned state on join (baseVersion 0).
     const joinA = await emitAck(clientA.socket, 'session:join', { sessionId, userId: 'userA' });
     const joinB = await emitAck(clientB.socket, 'session:join', { sessionId, userId: 'userB' });
     assert.equal(joinA.ok, true);
@@ -96,7 +95,6 @@ describe('concurrent edits over sockets', () => {
     assert.equal(joinA.version, 0);
     assert.equal(joinB.version, 0);
 
-    // Simultaneous edits of the same line from the same baseVersion.
     const [resA, resB] = await Promise.all([
       emitAck(clientA.socket, 'cart:add', { sessionId, itemId, qty: 2, baseVersion: 0, addedBy: 'userA' }),
       emitAck(clientB.socket, 'cart:add', { sessionId, itemId, qty: 3, baseVersion: 0, addedBy: 'userB' }),
@@ -107,23 +105,27 @@ describe('concurrent edits over sockets', () => {
       ? { res: resB, client: clientB, user: 'userB', qty: 3 }
       : { res: resA, client: clientA, user: 'userA', qty: 2 };
 
-    // Winner applied at version 1 with first-adder attribution.
+    const winnerKey = `${itemId}:${winner.user}`;
     assert.equal(winner.res.version, 1);
-    assert.deepEqual(winner.res.cart, { [itemId]: { qty: winner.qty, addedBy: winner.user, price: winner.res.cart[itemId].price } });
+    assert.deepEqual(winner.res.cart, {
+      [winnerKey]: {
+        itemId,
+        qty: winner.qty,
+        addedBy: winner.user,
+        price: winner.res.cart[winnerKey].price,
+      },
+    });
 
-    // Loser got VERSION_CONFLICT carrying the current state to merge.
     assert.equal(loser.res.ok, false);
     assert.equal(loser.res.code, 'VERSION_CONFLICT');
     assert.equal(loser.res.currentVersion, 1);
     assert.deepEqual(loser.res.currentState, winner.res.cart);
 
-    // Both clients were broadcast the winner's state (scroll-safe merge input).
     await waitFor(
       () => clientA.syncs.some((s) => s.version === 1) && clientB.syncs.some((s) => s.version === 1),
       'both clients should receive cart:sync v1'
     );
 
-    // Loser applies currentState and retries the pending mutation.
     const retry = await emitAck(loser.client.socket, 'cart:add', {
       sessionId,
       itemId,
@@ -133,10 +135,11 @@ describe('concurrent edits over sockets', () => {
     });
     assert.equal(retry.ok, true);
     assert.equal(retry.version, 2);
-    // Last writer wins on qty; attribution stays with the first adder
-    // (display-only — the non-adder was never blocked from mutating).
-    assert.equal(retry.cart[itemId].qty, loser.qty);
-    assert.equal(retry.cart[itemId].addedBy, winner.user);
+    const loserKey = `${itemId}:${loser.user}`;
+    assert.equal(retry.cart[winnerKey].qty, winner.qty);
+    assert.equal(retry.cart[winnerKey].addedBy, winner.user);
+    assert.equal(retry.cart[loserKey].qty, loser.qty);
+    assert.equal(retry.cart[loserKey].addedBy, loser.user);
 
     await waitFor(
       () => clientA.syncs.some((s) => s.version === 2) && clientB.syncs.some((s) => s.version === 2),

@@ -12,8 +12,9 @@ Implemented end-to-end (backend enforce + Flutter merge/retry).
   - mismatch → `{ ok: false, code: 'VERSION_CONFLICT', currentVersion,
     currentState }`; state untouched. Also `OUT_OF_STOCK` (+ `available`),
     `UNKNOWN_ITEM` (SQLite existence/price check), `INVALID_PAYLOAD`.
-  - `addedBy` is first-adder attribution (display only); price comes from
-    SQLite, not the client.
+  - `addedBy` is required; each participant owns
+    `` `${itemId}:${addedBy}` `` (others cannot edit/remove that line).
+    Price comes from SQLite, not the client.
 - `backend/server.js`:
   - `GET /api/sessions/:id/state` returns the live `cart` + `version`
     (client's `baseVersion` source; fresh sessions still `{} / 0`).
@@ -34,8 +35,9 @@ Implemented end-to-end (backend enforce + Flutter merge/retry).
 - `tests/cart.test.js` (new, 8 tests): version 0/empty start, apply+INCR,
   stale→conflict→retry, concurrent same-baseVersion (one wins, one
   conflicts), decrease/remove releasing stock, `OUT_OF_STOCK`, unknown
-  item, REST state liveness, `addedBy` display-only (anyone may edit;
-  first adder keeps credit; re-add after removal changes hands).
+  first adder keeps credit; re-add after removal changes hands). See
+  `per-user-cart-lines.md` for the ownership model that replaced
+  display-only `addedBy`.
 - `tests/realtime.test.js` (new): two real socket.io clients join one
   session and edit the same line from `baseVersion: 0` simultaneously —
   asserts one ack wins at v1, the loser ack is `VERSION_CONFLICT` with

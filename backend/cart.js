@@ -2,7 +2,9 @@
  * Phase 2 — Optimistic concurrency control (PRD §10) + cart state (PRD §7.2).
  *
  * Single-process in-memory state per session:
- * - `session:{id}:cart`    Map itemId -> { qty, addedBy, price }
+ * - `session:{id}:cart`    Map lineKey → { itemId, qty, addedBy, price }
+ *   lineKey = `${itemId}:${addedBy}` — each participant owns their own line
+ *   for a menu item (so user2 +1 creates a second line, not edits user1's).
  * - `session:{id}:version` monotonic counter, starts at 0
  *
  * Mutation protocol:
@@ -11,6 +13,9 @@
  *               `cart:sync { version, cart, delta }`.
  * 3. Mismatch → reject `{ ok: false, code: 'VERSION_CONFLICT', currentVersion,
  *               currentState }`; client merges `currentState` and retries.
+ *
+ * Ownership: mutations always target the caller's own line (`addedBy` required).
+ * A participant cannot delete or change another participant's qty.
  *
  * A per-session promise-chain mutex serializes check-apply-INCR so two
  * concurrent same-`baseVersion` mutations can't both win (last writer wins,
@@ -23,7 +28,7 @@
 const { reserveStock, releaseStock } = require('./stock');
 
 /**
- * @typedef {{ qty: number, addedBy: string | null, price: number }} CartLine
+ * @typedef {{ itemId: string, qty: number, addedBy: string, price: number }} CartLine
  * @typedef {{ version: number, cart: Map<string, CartLine> }} SessionCart
  */
 
@@ -32,6 +37,10 @@ const sessionCarts = new Map();
 
 /** @type {Map<string, Promise<void>>} sessionId -> mutex tail */
 const sessionLocks = new Map();
+
+function lineKey(itemId, addedBy) {
+  return `${itemId}:${addedBy}`;
+}
 
 function getEntry(sessionId) {
   let entry = sessionCarts.get(sessionId);
@@ -66,11 +75,16 @@ function lookupMenuItem(itemId) {
     .get(itemId);
 }
 
-/** Plain-object snapshot: `{ [itemId]: { qty, addedBy, price } }`. */
+/** Plain-object snapshot: `{ [lineKey]: { itemId, qty, addedBy, price } }`. */
 function snapshot(cart) {
   const out = {};
-  for (const [itemId, line] of cart) {
-    out[itemId] = { qty: line.qty, addedBy: line.addedBy, price: line.price };
+  for (const [key, line] of cart) {
+    out[key] = {
+      itemId: line.itemId,
+      qty: line.qty,
+      addedBy: line.addedBy,
+      price: line.price,
+    };
   }
   return out;
 }
@@ -86,15 +100,17 @@ function getCartState(sessionId) {
 
 /**
  * Apply a set-qty mutation (`cart:add` / `cart:updateQty` / `cart:remove`).
+ * Always mutates the caller's own line for `itemId` (keyed by addedBy).
  * @param {string} sessionId
  * @param {{ itemId: string, qty: number, baseVersion: number, addedBy?: string | null }} mutation
  */
 async function applyMutation(sessionId, mutation) {
   const { itemId, qty, baseVersion } = mutation ?? {};
-  const addedBy = mutation?.addedBy ?? null;
+  const addedBy = typeof mutation?.addedBy === 'string' ? mutation.addedBy.trim() : '';
   if (
     !sessionId ||
     !itemId ||
+    !addedBy ||
     !Number.isInteger(qty) ||
     qty < 0 ||
     !Number.isInteger(baseVersion) ||
@@ -103,7 +119,7 @@ async function applyMutation(sessionId, mutation) {
     return {
       ok: false,
       code: 'INVALID_PAYLOAD',
-      message: 'itemId, qty (≥ 0) and baseVersion (≥ 0) are required',
+      message: 'itemId, qty (≥ 0), baseVersion (≥ 0) and addedBy are required',
       currentVersion: getSessionVersion(sessionId),
       currentState: getCartState(sessionId),
     };
@@ -133,7 +149,8 @@ async function applyMutation(sessionId, mutation) {
       };
     }
 
-    const oldQty = entry.cart.get(itemId)?.qty ?? 0;
+    const key = lineKey(itemId, addedBy);
+    const oldQty = entry.cart.get(key)?.qty ?? 0;
     const delta = qty - oldQty;
 
     if (delta > 0) {
@@ -151,12 +168,12 @@ async function applyMutation(sessionId, mutation) {
     }
 
     if (qty === 0) {
-      entry.cart.delete(itemId);
+      entry.cart.delete(key);
     } else {
-      entry.cart.set(itemId, {
+      entry.cart.set(key, {
+        itemId,
         qty,
-        // addedBy is display-only attribution; first adder keeps credit.
-        addedBy: entry.cart.get(itemId)?.addedBy ?? addedBy,
+        addedBy,
         price: menuItem.price_paise,
       });
     }
@@ -170,7 +187,7 @@ async function applyMutation(sessionId, mutation) {
       ok: true,
       version: entry.version,
       cart: snapshot(entry.cart),
-      delta: { itemId, qty },
+      delta: { itemId, qty, addedBy, lineKey: key },
     };
   });
 }
@@ -188,6 +205,7 @@ function removeSessionCart(sessionId) {
 }
 
 module.exports = {
+  lineKey,
   getSessionVersion,
   getCartState,
   applyMutation,

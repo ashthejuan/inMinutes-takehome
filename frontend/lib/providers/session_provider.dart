@@ -1,6 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Active group session identity (Phase 0 scaffold; sockets in Phase 1).
+/// Active group session identity (REST create/join + socket room).
 class SessionState {
   const SessionState({
     this.sessionId,

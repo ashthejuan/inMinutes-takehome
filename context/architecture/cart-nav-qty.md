@@ -13,6 +13,10 @@ Implemented (frontend-only change).
 ## What was built
 - `frontend/lib/ui/screens/menu_screen.dart`
   - `AppBar.leading`: back arrow → `context.go('/')`. One tap reaches home.
+- `frontend/lib/ui/screens/join_group_screen.dart`
+  - `AppBar.leading`: back arrow → `context.go('/')` (logical parent —
+    opened from Home's Join Group Order button). Same `go()`-stack reason
+    as menu/cart: no automatic back arrow, so explicit leading.
 - `frontend/lib/ui/screens/cart_screen.dart`
   - `AppBar.leading`: back arrow → `context.go('/menu')` (logical parent —
     cart is opened from the menu badge).
@@ -38,14 +42,16 @@ Implemented (frontend-only change).
 | Path | Role |
 |------|------|
 | `frontend/lib/ui/screens/menu_screen.dart` | Back-to-home leading |
+| `frontend/lib/ui/screens/join_group_screen.dart` | Back-to-home leading |
 | `frontend/lib/ui/screens/cart_screen.dart` | Back-to-menu leading, home action, qty stepper |
 | `context/architecture/cart-nav-qty.md` | This note |
 
 ## How to verify
 ```bash
 cd frontend
-flutter analyze lib/ui/screens/cart_screen.dart lib/ui/screens/menu_screen.dart
+flutter analyze lib/ui/screens/cart_screen.dart lib/ui/screens/menu_screen.dart lib/ui/screens/join_group_screen.dart
 flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:3000
 # /menu shows back arrow → / ; /cart shows back arrow → /menu + home icon → /
+# /group/join shows back arrow → /
 # /cart rows show [-] qty [+] ; - at 1 removes row ; + disabled at stock cap.
 ```

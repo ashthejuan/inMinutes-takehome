@@ -6,42 +6,150 @@ import 'package:go_router/go_router.dart';
 import '../../data/models/menu_item.dart';
 import '../../providers/cart_provider.dart';
 import '../../providers/menu_provider.dart';
+import '../../providers/participants_provider.dart';
+import '../../providers/session_controller.dart';
+import '../../providers/session_provider.dart';
 import '../../theme.dart';
 
-class MenuScreen extends ConsumerWidget {
+class MenuScreen extends ConsumerStatefulWidget {
   const MenuScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MenuScreen> createState() => _MenuScreenState();
+}
+
+class _MenuScreenState extends ConsumerState<MenuScreen> {
+  bool _creating = false;
+
+  Future<String?> _askHostName() async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Start Group Order'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            textCapitalization: TextCapitalization.words,
+            maxLength: 50,
+            decoration: const InputDecoration(
+              labelText: 'Your display name',
+              border: OutlineInputBorder(),
+              counterText: '',
+            ),
+            onSubmitted: (value) {
+              final trimmed = value.trim();
+              if (trimmed.isNotEmpty) Navigator.of(context).pop(trimmed);
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final trimmed = controller.text.trim();
+                if (trimmed.isEmpty) return;
+                Navigator.of(context).pop(trimmed);
+              },
+              child: const Text('Create'),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+    return name?.trim();
+  }
+
+  Future<void> _startGroupOrder() async {
+    if (_creating) return;
+    final hostName = await _askHostName();
+    if (hostName == null || hostName.isEmpty || !mounted) return;
+
+    setState(() => _creating = true);
+    try {
+      final created =
+          await ref.read(apiClientProvider).createSession(displayName: hostName);
+      final sessionId =
+          (created['sessionId'] ?? created['id'])?.toString() ?? '';
+      final hostId =
+          (created['hostId'] ?? created['host_id'])?.toString() ?? '';
+      final joinCode =
+          (created['joinCode'] ?? created['join_code'])?.toString() ?? '';
+      if (sessionId.isEmpty || hostId.isEmpty) {
+        throw Exception('Session response missing ids');
+      }
+      ref.read(sessionControllerProvider).enterSession(
+            sessionId: sessionId,
+            userId: hostId,
+            hostId: hostId,
+            joinCode: joinCode.isEmpty ? null : joinCode,
+            displayName: hostName,
+          );
+      if (!mounted) return;
+      context.go('/group/$sessionId');
+    } catch (err) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('$err')));
+    } finally {
+      if (mounted) setState(() => _creating = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final menuAsync = ref.watch(menuProvider);
     final soloCart = ref.watch(soloCartProvider);
+    final session = ref.watch(sessionProvider);
+    final groupCart = ref.watch(groupCartProvider);
+    final inSession = session.isInSession;
+    final badgeCount = inSession
+        ? groupCart.values.fold<int>(0, (a, b) => a + b.qty)
+        : soloCart.values.fold<int>(0, (a, b) => a + b);
 
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
-          tooltip: 'Back to home',
+          tooltip: inSession ? 'Back to group cart' : 'Back to home',
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/'),
+          onPressed: () {
+            if (inSession && session.sessionId != null) {
+              context.go('/group/${session.sessionId}');
+            } else {
+              context.go('/');
+            }
+          },
         ),
-        title: const Text('Menu'),
+        title: Text(inSession ? 'Menu · Group Order' : 'Menu'),
         actions: [
-          TextButton(
-            onPressed: () {
-              // Group session creation lands in Phase 1.
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Group order creation comes in Phase 1'),
-                ),
-              );
-            },
-            child: const Text('Start Group Order'),
-          ),
+          if (!inSession)
+            TextButton(
+              onPressed: _creating ? null : _startGroupOrder,
+              child: _creating
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Start Group Order'),
+            ),
           IconButton(
-            tooltip: 'Cart',
-            onPressed: () => context.go('/cart'),
+            tooltip: inSession ? 'Group cart' : 'Cart',
+            onPressed: () {
+              if (inSession && session.sessionId != null) {
+                context.go('/group/${session.sessionId}');
+              } else {
+                context.go('/cart');
+              }
+            },
             icon: Badge(
-              isLabelVisible: soloCart.isNotEmpty,
-              label: Text('${soloCart.values.fold<int>(0, (a, b) => a + b)}'),
+              isLabelVisible: badgeCount > 0,
+              label: Text('$badgeCount'),
               child: const Icon(Icons.shopping_bag_outlined),
             ),
           ),
@@ -209,10 +317,54 @@ class _MenuRow extends ConsumerWidget {
 
   final MenuItem item;
 
+  String _adderLabel(List<Participant> participants, String? addedBy) {
+    if (addedBy == null || addedBy.isEmpty) return 'Someone';
+    for (final p in participants) {
+      if (p.userId == addedBy) return p.name;
+    }
+    return addedBy;
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final qty = ref.watch(soloCartProvider)[item.id] ?? 0;
+    final session = ref.watch(sessionProvider);
+    final inSession = session.isInSession;
+    final groupCart = inSession ? ref.watch(groupCartProvider) : const <String, CartLine>{};
+    final participants = inSession ? ref.watch(participantsProvider) : const <Participant>[];
+    final myUserId = session.userId;
+
+    final itemLines = <CartLine>[
+      for (final line in groupCart.values)
+        if (line.itemId == item.id) line,
+    ];
+    CartLine? myLine;
+    for (final line in itemLines) {
+      if (line.addedBy == myUserId) {
+        myLine = line;
+        break;
+      }
+    }
+    final myQty = inSession
+        ? (myLine?.qty ?? 0)
+        : (ref.watch(soloCartProvider)[item.id] ?? 0);
+    final totalQty = inSession
+        ? itemLines.fold<int>(0, (sum, line) => sum + line.qty)
+        : myQty;
     final outOfStock = item.stock <= 0;
+    final atCap = totalQty >= item.stock;
+
+    void setMyQty(int next) {
+      if (inSession) {
+        ref.read(sessionControllerProvider).mutate(item.id, next);
+      } else {
+        ref.read(soloCartProvider.notifier).setQty(item.id, next);
+      }
+    }
+
+    final otherLines = [
+      for (final line in itemLines)
+        if (line.addedBy != myUserId) line,
+    ];
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -252,21 +404,42 @@ class _MenuRow extends ConsumerWidget {
                     fontSize: 13,
                   ),
                 ),
+                if (inSession && otherLines.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  for (final line in otherLines)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        'Added by ${_adderLabel(participants, line.addedBy)} (quantity ${line.qty})',
+                        style: const TextStyle(
+                          color: AppTheme.textSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                ],
+                if (inSession && myQty > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      'Added by you (quantity $myQty)',
+                      style: const TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
           const SizedBox(width: 8),
           _QtyControls(
-            qty: qty,
-            enabled: !outOfStock,
-            onDecrement: () {
-              ref.read(soloCartProvider.notifier).setQty(item.id, qty - 1);
-            },
+            qty: myQty,
+            enabled: !outOfStock && !atCap,
+            onDecrement: () => setMyQty(myQty - 1),
             onIncrement: () {
-              if (qty >= item.stock) {
-                return;
-              }
-              ref.read(soloCartProvider.notifier).setQty(item.id, qty + 1);
+              if (atCap) return;
+              setMyQty(myQty + 1);
             },
           ),
         ],
@@ -328,9 +501,9 @@ class _QtyControls extends StatelessWidget {
     if (qty == 0) {
       return SizedBox(
         height: 36,
-        child: OutlinedButton(
+        child: FilledButton(
           onPressed: enabled ? onIncrement : null,
-          style: OutlinedButton.styleFrom(
+          style: FilledButton.styleFrom(
             minimumSize: const Size(64, 36),
             padding: const EdgeInsets.symmetric(horizontal: 12),
           ),

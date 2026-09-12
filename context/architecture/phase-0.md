@@ -21,7 +21,7 @@ Implemented end-to-end (backend skeleton + Flutter skeleton + menu fetch).
 - Routes: `/`, `/menu`, `/cart`, `/group/join`, `/group/:sessionId`, `/order/:orderId/success`.
 - Providers scaffolded: `sessionProvider`, `cartProvider` (family), `soloCartProvider`, `participantsProvider`, `checkoutProvider`, `menuProvider`.
 - Menu screen loads `GET /api/menu`, groups by category, shows price + stock, local qty controls for solo cart.
-- Theme follows `context/style_guide.md` (grayscale + single desaturated blue accent).
+- Theme follows `context/style_guide.md` (grayscale + single Stripe Purple `#635BFF` accent).
 
 ## Files touched
 | Path | Role |

@@ -1,14 +1,17 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Per-item cart line (family keyed by itemId). Mutations wired in Phase 1.
+/// One participant's contribution of a menu item in a group cart.
+/// Server keys lines by `itemId:addedBy` so ownership is enforceable.
 class CartLine {
   const CartLine({
+    required this.lineKey,
     required this.itemId,
     required this.qty,
     required this.pricePaise,
     this.addedBy,
   });
 
+  final String lineKey;
   final String itemId;
   final int qty;
   final int pricePaise;
@@ -54,7 +57,7 @@ final soloCartProvider =
 });
 
 /// Group-session cart. The server is the source of truth: replaced wholesale
-/// on every `cart:sync` / conflict merge (rows keyed by ValueKey(itemId)).
+/// on every `cart:sync` / conflict merge (rows keyed by lineKey = itemId:userId).
 class GroupCartNotifier extends StateNotifier<Map<String, CartLine>> {
   GroupCartNotifier() : super(const {});
 

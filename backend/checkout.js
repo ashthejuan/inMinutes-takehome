@@ -19,11 +19,18 @@ function performCheckout(sessionId, callerUserId) {
   const database = getDb();
   const session = database
     .prepare(
-      'SELECT id, join_code, host_id, status FROM group_sessions WHERE id = ?'
+      'SELECT id, join_code, host_id, status, expires_at FROM group_sessions WHERE id = ?'
     )
     .get(sessionId);
   if (!session) {
     return { ok: false, code: 'SESSION_NOT_FOUND', message: 'Session not found' };
+  }
+  // Phase 4: TTL expiry beats every other guard (PRD §15 #4).
+  if (session.status === 'expired' || Number(session.expires_at) <= Math.floor(Date.now() / 1000)) {
+    if (session.status === 'active') {
+      require('./expiry').expireSessionIfNeeded(database, session);
+    }
+    return { ok: false, code: 'SESSION_EXPIRED', message: 'Session expired' };
   }
   if (session.status !== 'active') {
     return { ok: false, code: 'SESSION_COMPLETED', message: 'Session already checked out' };
@@ -49,14 +56,14 @@ function performCheckout(sessionId, callerUserId) {
   }
 
   const cart = getCartState(sessionId);
-  const itemIds = Object.keys(cart);
-  if (itemIds.length === 0) {
+  const lines = Object.values(cart);
+  if (lines.length === 0) {
     return { ok: false, code: 'EMPTY_CART', message: 'Cart is empty' };
   }
 
   let total = 0;
-  for (const itemId of itemIds) {
-    total += cart[itemId].price * cart[itemId].qty;
+  for (const line of lines) {
+    total += line.price * line.qty;
   }
 
   const orderId = nanoid(12);
@@ -75,17 +82,21 @@ function performCheckout(sessionId, callerUserId) {
     const decStock = database.prepare(
       'UPDATE menu_items SET stock = stock - ? WHERE id = ?'
     );
-    for (const itemId of itemIds) {
-      const line = cart[itemId];
+    // Aggregate stock decrements per menu item (multiple lines can share itemId).
+    const stockByItem = new Map();
+    for (const line of lines) {
       insertItem.run(
         nanoid(12),
         orderId,
-        itemId,
+        line.itemId,
         line.qty,
         line.price,
         line.addedBy ?? session.host_id
       );
-      decStock.run(line.qty, itemId);
+      stockByItem.set(line.itemId, (stockByItem.get(line.itemId) ?? 0) + line.qty);
+    }
+    for (const [menuItemId, qty] of stockByItem) {
+      decStock.run(qty, menuItemId);
     }
     database
       .prepare("UPDATE group_sessions SET status = 'completed' WHERE id = ?")

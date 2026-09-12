@@ -7,6 +7,7 @@ const path = require('node:path');
 const { initDb, closeDb, getMenuItems } = require('../backend/db');
 const { refreshStockCache, setCachedStock, getAvailable, clearStockState } = require('../backend/stock');
 const {
+  lineKey,
   getSessionVersion,
   getCartState,
   applyMutation,
@@ -42,6 +43,17 @@ describe('optimistic concurrency control', () => {
     setCachedStock(itemId, 10);
   });
 
+  function line(userId, qty) {
+    return {
+      [lineKey(itemId, userId)]: {
+        itemId,
+        qty,
+        addedBy: userId,
+        price: itemPrice,
+      },
+    };
+  }
+
   it('starts at version 0 with an empty cart', () => {
     assert.equal(getSessionVersion('s1'), 0);
     assert.deepEqual(getCartState('s1'), {});
@@ -51,8 +63,8 @@ describe('optimistic concurrency control', () => {
     const res = await applyMutation('s1', { itemId, qty: 2, baseVersion: 0, addedBy: 'u1' });
     assert.equal(res.ok, true);
     assert.equal(res.version, 1);
-    assert.deepEqual(res.delta, { itemId, qty: 2 });
-    assert.deepEqual(getCartState('s1'), { [itemId]: { qty: 2, addedBy: 'u1', price: itemPrice } });
+    assert.deepEqual(res.delta, { itemId, qty: 2, addedBy: 'u1', lineKey: lineKey(itemId, 'u1') });
+    assert.deepEqual(getCartState('s1'), line('u1', 2));
     assert.equal(getSessionVersion('s1'), 1);
   });
 
@@ -63,18 +75,17 @@ describe('optimistic concurrency control', () => {
     assert.equal(loser.ok, false);
     assert.equal(loser.code, 'VERSION_CONFLICT');
     assert.equal(loser.currentVersion, 1);
-    assert.deepEqual(loser.currentState, { [itemId]: { qty: 2, addedBy: 'u1', price: itemPrice } });
-    // Rejected mutation leaves state untouched.
+    assert.deepEqual(loser.currentState, line('u1', 2));
     assert.equal(getSessionVersion('s1'), 1);
 
-    // Loser merges currentState and retries with the fresh version.
+    // Retry creates u2's own line; u1's line stays untouched.
     const retry = await applyMutation('s1', { itemId, qty: 5, baseVersion: loser.currentVersion, addedBy: 'u2' });
     assert.equal(retry.ok, true);
     assert.equal(retry.version, 2);
-    assert.equal(getCartState('s1')[itemId].qty, 5);
+    assert.deepEqual(getCartState('s1'), { ...line('u1', 2), ...line('u2', 5) });
   });
 
-  it('concurrent same-baseVersion edits: last writer wins, loser conflicts', async () => {
+  it('concurrent same-baseVersion edits: one wins, loser conflicts', async () => {
     const [a, b] = await Promise.all([
       applyMutation('s1', { itemId, qty: 2, baseVersion: 0, addedBy: 'u1' }),
       applyMutation('s1', { itemId, qty: 3, baseVersion: 0, addedBy: 'u2' }),
@@ -85,7 +96,8 @@ describe('optimistic concurrency control', () => {
     assert.equal(conflictCount, 1);
     assert.equal(getSessionVersion('s1'), 1);
     const winner = a.ok ? a : b;
-    assert.equal(getCartState('s1')[itemId].qty, winner.delta.qty);
+    const winnerUser = a.ok ? 'u1' : 'u2';
+    assert.deepEqual(getCartState('s1'), line(winnerUser, winner.delta.qty));
   });
 
   it('qty decrease and remove release stock', async () => {
@@ -110,35 +122,34 @@ describe('optimistic concurrency control', () => {
   });
 
   it('unknown item rejects without touching version', async () => {
-    const res = await applyMutation('s1', { itemId: 'nope', qty: 1, baseVersion: 0 });
+    const res = await applyMutation('s1', { itemId: 'nope', qty: 1, baseVersion: 0, addedBy: 'u1' });
     assert.equal(res.ok, false);
     assert.equal(res.code, 'UNKNOWN_ITEM');
     assert.equal(getSessionVersion('s1'), 0);
   });
 
-  it('addedBy is display-only: any participant may edit any line', async () => {
+  it('mutations only touch the caller line; other users cannot delete it', async () => {
     await applyMutation('s1', { itemId, qty: 2, baseVersion: 0, addedBy: 'u1' });
-    // A different user edits the line — allowed, attribution stays.
+    // u2 "adding" creates a separate line — u1's qty stays 2.
     const edited = await applyMutation('s1', { itemId, qty: 5, baseVersion: 1, addedBy: 'u2' });
     assert.equal(edited.ok, true);
-    assert.equal(edited.cart[itemId].addedBy, 'u1');
-    // ... including removing it entirely.
+    assert.deepEqual(getCartState('s1'), { ...line('u1', 2), ...line('u2', 5) });
+    // u2 remove only clears u2's line.
     const removed = await applyMutation('s1', { itemId, qty: 0, baseVersion: 2, addedBy: 'u2' });
     assert.equal(removed.ok, true);
-    assert.deepEqual(getCartState('s1'), {});
+    assert.deepEqual(getCartState('s1'), line('u1', 2));
   });
 
-  it('addedBy changes hands when the line is re-added after removal', async () => {
+  it('re-add after removal uses the new adder as line owner', async () => {
     await applyMutation('s1', { itemId, qty: 2, baseVersion: 0, addedBy: 'u1' });
     await applyMutation('s1', { itemId, qty: 0, baseVersion: 1, addedBy: 'u1' });
     const readded = await applyMutation('s1', { itemId, qty: 1, baseVersion: 2, addedBy: 'u2' });
     assert.equal(readded.ok, true);
-    assert.equal(readded.cart[itemId].addedBy, 'u2');
+    assert.deepEqual(getCartState('s1'), line('u2', 1));
   });
 
   it('REST state exposes the live versioned cart for baseVersion reads', async () => {
     const { buildServer } = require('../backend/server');
-    // Reuse the same sqlite file so menu ids match the cache.
     const app = await buildServer({ dbPath, logger: false });
 
     try {
@@ -153,10 +164,9 @@ describe('optimistic concurrency control', () => {
 
       const after = await app.inject({ method: 'GET', url: `/api/sessions/${sessionId}/state` });
       assert.equal(after.json().version, 1);
-      assert.deepEqual(after.json().cart, { [itemId]: { qty: 2, addedBy: 'u1', price: itemPrice } });
+      assert.deepEqual(after.json().cart, line('u1', 2));
     } finally {
       await app.close();
-      // buildServer with dbPath forced a re-init; restore this suite's db handle.
       initDb({ dbPath, force: true });
       refreshStockCache();
     }

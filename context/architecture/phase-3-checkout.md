@@ -19,7 +19,7 @@ Implemented e2e with socket + REST tests. Backend 34 pass
 |------|------|
 | `lib/data/services/session_socket.dart` | `onParticipantsSync` / `onCheckoutAvailable` / `onSessionCheckout`, `setReady()`, `checkout()`. |
 | `lib/providers/session_controller.dart` | Applies `participants:sync` → `participantsProvider`; `session:checkout` → `onCheckout(orderId)`; non-conflict `error` codes → `onErrorMessage` SnackBar; `setReady()` with optimistic flip; `checkout()`. |
-| `lib/ui/screens/collaborative_cart_screen.dart` | `ConsumerStatefulWidget`: wires `onCheckout` → `go /order/:id/success`, `onErrorMessage` → SnackBar; subtotal bar + `Mark Ready` toggle + `Waiting for:` list + host-only hint; FAB calls real `checkout()` and stays disabled until `isHost && allReady`. |
+| `lib/ui/screens/collaborative_cart_screen.dart` | `ConsumerStatefulWidget`: wires `onCheckout` → `go /order/:id/success`, `onErrorMessage` → SnackBar; subtotal/status + Mark Ready above a full-width Place Order bar; line titles resolve menu `name` via `menuProvider` (fallback `itemId`); Place Order disabled until `isHost && allReady`. |
 
 ### Tests
 `tests/checkout.test.js` (4 e2e over real sockets): ready broadcast + gate opens;
