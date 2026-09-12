@@ -13,6 +13,15 @@ class SessionSocket {
 
   final Map<String, void Function(dynamic)> _handlers = {};
 
+  /// Last joined identity — replayed on socket.io `reconnect` (PRD §8).
+  /// Cleared on [disconnect] so a post-leave reconnect never rejoins.
+  String? _lastSessionId;
+  String? _lastUserId;
+
+  /// Fired after a transport reconnect + rejoin (UI "back online" notice).
+  /// Set by the controller; invoked on the socket event thread.
+  void Function()? onReconnected;
+
   bool get isConnected => _socket?.connected ?? false;
 
   void connect() {
@@ -24,6 +33,17 @@ class SessionSocket {
     for (final entry in _handlers.entries) {
       _socket!.on(entry.key, entry.value);
     }
+    // Transport auto-reconnect (phone lock / WiFi drop / backgrounding) opens
+    // a NEW server-side socket with no room membership, so re-emit
+    // `session:join` — the server replays full cart + participants state.
+    // Only `reconnect` is handled here (not `connect`): the initial join goes
+    // through join()'s once('connect'), and `reconnect` never fires on first
+    // connect — exactly one join per connection epoch, which keeps the
+    // server's per-user socket count accurate.
+    _socket!.on('reconnect', (_) {
+      _rejoinIfNeeded();
+      onReconnected?.call();
+    });
     _socket!.connect();
   }
 
@@ -66,6 +86,8 @@ class SessionSocket {
   }
 
   void join(String sessionId, String userId) {
+    _lastSessionId = sessionId;
+    _lastUserId = userId;
     void emitJoin() {
       _socket?.emit('session:join', {'sessionId': sessionId, 'userId': userId});
     }
@@ -75,6 +97,17 @@ class SessionSocket {
       return;
     }
     _socket?.once('connect', (_) => emitJoin());
+  }
+
+  /// Re-emit the last `session:join` after a transport reconnect. No-op when
+  /// never joined or after [disconnect]/[leave]. Mutations emitted while
+  /// offline flush with a stale `baseVersion` and self-heal through the
+  /// existing `VERSION_CONFLICT` merge + single-retry path.
+  void _rejoinIfNeeded() {
+    final sessionId = _lastSessionId;
+    final userId = _lastUserId;
+    if (sessionId == null || userId == null) return;
+    _socket?.emit('session:join', {'sessionId': sessionId, 'userId': userId});
   }
 
   /// Phase 4: explicit leave — server detaches presence, transfers host
@@ -122,5 +155,7 @@ class SessionSocket {
     _socket?.disconnect();
     _socket?.dispose();
     _socket = null;
+    _lastSessionId = null;
+    _lastUserId = null;
   }
 }

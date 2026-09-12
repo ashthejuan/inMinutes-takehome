@@ -25,6 +25,12 @@ room, and navigate to `/group/:sessionId`.
 - Handlers are stored and re-attached on `connect()` so Riverpod init (before
   the socket exists) still receives `cart:sync` / `participants:sync` / etc.
 - `join` waits for the `connect` event when the socket is not yet up.
+- Reconnect rejoin: `join()` stores identity, `disconnect()` clears it, and a
+  persistent `on('reconnect')` re-emits `session:join` (server replays full
+  state; offline-buffered mutations self-heal via `VERSION_CONFLICT` retry).
+  Only `reconnect` is handled — exactly one join per connection epoch, which
+  keeps the server's per-user socket count accurate. See
+  `socket-reconnect-rejoin.md`.
 - Uses `disableAutoConnect` + explicit `connect()`.
 
 ### UI

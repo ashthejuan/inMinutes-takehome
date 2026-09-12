@@ -14,7 +14,9 @@ deferred per `context/build_plan.md`.
 - Generates `id` + `host_id` via `nanoid(12)`, 6-char uppercase join code via
   `customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6)` with DB uniqueness loop.
 - Inserts `group_sessions(id, join_code, host_id, status='active',
-  created_at=unix-sec, expires_at=created_at+24h)` plus host
+  created_at=unix-sec, expires_at=created_at+TTL)` (sliding 30-min idle since
+  the touch update — was fixed `+24h` in Phase 1; see `session-ttl-touch.md`)
+  plus host
   `session_participants(session_id, user_id=host_id, is_host=1,
   joined_at=Date.now())` in one SQLite transaction.
 - Returns `{ id, join_code, status, created_at, expires_at, host_id }` plus

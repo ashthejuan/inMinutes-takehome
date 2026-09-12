@@ -17,8 +17,8 @@ A Flutter mobile application enabling users to place individual orders or partic
 1. **Host** taps "Start Group Order" → generates 6-character **Join Code**.
 2. **Participants** enter Join Code + Display Name → join session.
 3. **Real-time Collaborative Cart**:
-   - Any user adds/updates/removes items → instantly reflected for all.
-   - Each item shows **who added it** (attribution badge).
+   - Any user adds/updates/removes **their own** items → instantly reflected for all (lines keyed `itemId:addedBy`, see §5.3.1).
+   - Each line shows **who added it** (attribution badge = ownership badge; steppers only on your own lines).
    - Stock is **reserved atomically**: if User A takes the last 2 units, User B sees "Out of Stock" immediately; if User A removes them, stock releases for others.
    - Concurrent edits on same item → optimistic locking with version vector; loser receives current state + retry.
 4. **Ready Status**: Each participant toggles "Ready" when done. UI shows "Ready" vs "Still Browsing".
@@ -34,7 +34,7 @@ A Flutter mobile application enabling users to place individual orders or partic
 | FR-01 | Host creates group session → returns unique Join Code | P0 |
 | FR-02 | Participants join via Join Code + Display Name | P0 |
 | FR-03 | Real-time cart sync across all participants (add/update/remove) | P0 |
-| FR-04 | Item attribution: every cart line shows `addedBy` user (display only) | P0 |
+| FR-04 | Per-user ownership: every cart line is keyed `itemId:addedBy`, shows owner, only owner may edit/remove | P0 |
 | FR-05 | Atomic stock reservation with immediate release on removal | P0 |
 | FR-06 | Optimistic concurrency control (version vector) on cart mutations | P0 |
 | FR-07 | Conflict resolution: rejected mutations return current state for retry | P0 |
@@ -43,7 +43,7 @@ A Flutter mobile application enabling users to place individual orders or partic
 | FR-10 | Host transfer: if host disconnects, role transfers to earliest-joined connected participant; broadcast `host:changed` | P0 |
 | FR-11 | Order persistence with item-level attribution (`added_by`) | P0 |
 | FR-12 | Menu browsing with categories, stock display | P1 |
-| FR-13 | Session expiry after 30 min inactivity | P1 |
+| FR-13 | Session expiry after 30 min inactivity (sliding deadline — see §15 #4) | P1 |
 | FR-14 | Smooth UI during sync (no scroll jump, no input interruption) | P1 |
 
 ---
@@ -94,12 +94,27 @@ A Flutter mobile application enabling users to place individual orders or partic
 
 ### 5.3 Key Invariants
 
-1. **Collaborative Cart**: Any participant may update quantity or remove any cart line item; `addedBy` is display-only attribution, not a permission check.
+1. **Per-User Cart Lines (Ownership)**: Cart lines are keyed by `itemId:addedBy`. Each participant owns their own line for a menu item — only the owner may update quantity or remove it (others see static `× qty`, no steppers). `addedBy` is both attribution and the permission key; the server derives it from socket identity so clients cannot spoof another participant's line.
 2. **Stock Consistency**: Reservations are atomic (in-memory mutex per session); `available = totalStock - Σreservations`.
 3. **Optimistic Locking**: Every cart mutation carries `baseVersion`; server rejects if stale.
 4. **Host Authority**: Only `session.hostId` can trigger checkout.
 5. **All-Ready Gate**: Checkout enabled iff `participants.every(p => p.ready === true)`.
 6. **Host Transfer**: If host disconnects, host role transfers to the connected participant with the earliest `joined_at`; `host:changed` event broadcast to all.
+
+### 5.4 Design Note — Deviation from Original Request (Per-User Ownership)
+
+**Original request (kept for record):** shared editable cart — any participant could update quantity or remove any cart line; `addedBy` was display-only attribution, not a permission check. Concurrent edits on the same line resolved via optimistic locking (last-writer-wins, loser gets `VERSION_CONFLICT` + retry).
+
+**What shipped instead:** per-user cart lines (§5.3.1). Same menu item added by two people produces two lines (`burger:host`, `burger:priya`); you can only stepper/delete your own line.
+
+**WHY the deviation:**
+- **Cheap:** one-line key change (`itemId` → `itemId:addedBy`) in `backend/cart.js` + owner-scoped mutate + `socket.data.userId` as source of truth; checkout already aggregates by `itemId` (`UNIQUE(order_id, menu_item_id, added_by)` needed no migration).
+- **Nicer UX for a group cart (defensible):** nobody can accidentally zero-out or steal someone else's dish — the #1 social friction in shared carts. Each person's dishes stay theirs; group subtotal + shared checkout preserve the "together" feeling.
+- **Fewer conflicts:** cross-user LWW fights disappear; `VERSION_CONFLICT` now only fires on true races (same owner's line, or version race across lines), so retry logic triggers far less.
+- **Attribution becomes actionable:** the badge is no longer decorative — it tells you which stepper is yours.
+- **Spoof-proof:** server prefers socket identity for `addedBy`, so a client can't forge another user's line key.
+
+See `context/architecture/per-user-cart-lines.md` for implementation + files.
 
 ---
 
@@ -141,7 +156,7 @@ CREATE TABLE group_sessions (
   host_id TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
   created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL
+  expires_at INTEGER NOT NULL  -- sliding deadline: last_activity + 30 min (FR-13, §15 #4)
 );
 
 -- Participants (audit)
@@ -181,7 +196,7 @@ CREATE TABLE order_items (
 |-----|------|-------|
 | `session:{id}` | Object | `{ hostId, status, version, createdAt }` |
 | `session:{id}:participants` | Map | `userId → { name, ready, joinedAt }` |
-| `session:{id}:cart` | Map | `itemId → { qty, addedBy, price }` |
+| `session:{id}:cart` | Map | `lineKey (itemId:addedBy) → { itemId, qty, addedBy, price }` (one line per participant per item) |
 | `session:{id}:stock:reserved:{itemId}` | Number | Reserved quantity for this session |
 | `session:{id}:version` | Number | Monotonic counter for optimistic locking |
 | `menu:stock:{itemId}` | Number | Global available stock (cached from SQLite) |
@@ -194,9 +209,9 @@ CREATE TABLE order_items (
 
 | Event | Payload | Validation |
 |-------|---------|------------|
-| `cart:add` | `{ itemId, qty, baseVersion }` | `qty > 0`, stock available, version match |
-| `cart:updateQty` | `{ itemId, qty, baseVersion }` | `qty ≥ 0`, stock delta, version match |
-| `cart:remove` | `{ itemId, baseVersion }` | Version match |
+| `cart:add` | `{ itemId, qty, baseVersion }` (`addedBy` = socket identity, client cannot spoof) | `qty > 0`, stock available, version match → mutates caller's own `itemId:addedBy` line |
+| `cart:updateQty` | `{ itemId, qty, baseVersion }` (`addedBy` = socket identity) | `qty ≥ 0`, stock delta, version match → own line only |
+| `cart:remove` | `{ itemId, baseVersion }` (`addedBy` = socket identity) | Version match → own line only |
 | `user:ready` | `{ ready: boolean }` | — |
 | `checkout` | `{}` | Caller == host, all participants ready |
 
@@ -204,7 +219,7 @@ CREATE TABLE order_items (
 
 | Event | Payload | Trigger |
 |-------|---------|---------|
-| `cart:sync` | `{ version, cart: { [itemId]: { qty, addedBy, price } } }` | Any cart mutation |
+| `cart:sync` | `{ version, cart: { [lineKey]: { itemId, qty, addedBy, price } } }` | Any cart mutation |
 | `participants:sync` | `[{ userId, name, ready }]` | Join/leave/ready toggle |
 | `checkout:available` | `{ available: boolean }` | Ready state change |
 | `host:changed` | `{ hostId }` | Host disconnected, role transferred |
@@ -219,6 +234,17 @@ CREATE TABLE order_items (
 | `OUT_OF_STOCK` | Insufficient free stock | Show available count, disable add |
 | `ONLY_HOST_CAN_CHECKOUT` | Non-host called checkout | Disable button for non-host |
 | `NOT_ALL_READY` | Some participants not ready | Show who isn't ready |
+
+### 8.4 Reconnect / Rejoin
+
+Transport auto-reconnect opens a new server-side socket with no room
+membership, so the client re-emits `session:join` on every Socket.io
+`reconnect` (exactly once per connection epoch — initial join goes through
+the first `connect`). The server answers with full `cart:sync` +
+`participants:sync` + `checkout:available`, which the client applies as a
+ wholesale replace — no separate resync call needed. Mutations buffered while
+offline arrive with a stale `baseVersion` and heal via `VERSION_CONFLICT`
+merge + single retry (§10.4).
 
 ---
 
@@ -270,11 +296,12 @@ async function releaseStock(sessionId: string, itemId: string, qty: number) {
 ## 10. Optimistic Concurrency Control
 
 1. Client reads `version` with initial state.
-2. Every mutation sends `baseVersion`.
+2. Every mutation sends `baseVersion` (+ owner `addedBy`, server prefers socket identity).
 3. Server compares with current `version`:
-   - Match → apply, `INCR version`, broadcast `cart:sync { version, delta }`.
+   - Match → apply to caller's own `itemId:addedBy` line, `INCR version`, broadcast `cart:sync { version, delta }`.
    - Mismatch → reject with `error { code: 'VERSION_CONFLICT', currentVersion, currentState }`.
-4. Client on conflict: merge `currentState` (preserve scroll via `key: ValueKey(itemId)`), retry pending mutation.
+4. Client on conflict: merge `currentState` (preserve scroll via `key: ValueKey(lineKey)`), retry pending mutation.
+5. Two users adding the same menu item do **not** conflict — they create two lines. `VERSION_CONFLICT` only fires on true races (same owner's line, or version race across lines).
 
 ---
 
@@ -322,9 +349,12 @@ Home
 │  🟡       Rohan              ⏳ Browsing     │
 │  [Leave Session]                              │
 ├─────────────────────────────────────────────┤
-│ Menu Items (ListView)                        │
+│ Menu Items (ListView, one row per owner line)   │
 │ ┌─────────────────────────────────────────┐ │
-│ │ Chicken Biryani          👤 A  [-] 2 [+] │ │
+│ │ Chicken Biryani          👤 A  [-] 2 [+] │ │  ← own line: steppers
+│ │ ₹299 • Only 3 left                      │ │
+│ ├─────────────────────────────────────────┤ │
+│ │ Chicken Biryani          👤 P   × 1      │ │  ← Priya's line: static qty on my device
 │ │ ₹299 • Only 3 left                      │ │
 │ ├─────────────────────────────────────────┤ │
 │ │ Paneer Butter Masala     👤 P  [-] 1 [+] │ │
@@ -342,13 +372,13 @@ Home
 ```
 SessionProvider (StreamProvider<SessionState>)
     │
-    ├─► CartProvider (family per itemId) → rebuilds only changed items
+    ├─► CartProvider (family per lineKey `itemId:addedBy`) → rebuilds only changed lines
     ├─► ParticipantsProvider → list with ready status
     └─► CheckoutProvider → host-only, enabled when allReady
 ```
 
 - Socket events → `SessionController` → updates `SessionState` → notifies dependent providers.
-- Fine-grained rebuilds: `ListView.builder` with `key: ValueKey(itemId)` preserves scroll on targeted updates.
+- Fine-grained rebuilds: `ListView.builder` with `key: ValueKey(lineKey)` preserves scroll on targeted updates.
 
 ---
 
@@ -369,7 +399,7 @@ SessionProvider (StreamProvider<SessionState>)
 1. **No authentication** — sessions identified by join code only.
 2. **Single kitchen/menu** — no multi-restaurant logic.
 3. **Global stock** — shared across all sessions; reservations prevent oversell.
-4. **Session TTL** — 30 min inactivity → auto-expire (in-memory cleanup + SQLite audit remains).
+4. **Session TTL** — 30 min inactivity → auto-expire (sliding `expires_at = last_activity + 30 min`; REST joins, socket joins, cart mutations, and ready toggles slide it — read-only state fetches do not; in-memory cleanup + SQLite audit remains).
 5. **No payments** — checkout creates order record only.
 6. **One active session per user** — joining new session leaves previous.
 7. **Single backend replica** — SQLite is single-writer; in-memory ephemeral state requires single process. Redis + Lua is the natural next step for horizontal scaling.
@@ -409,8 +439,9 @@ SessionProvider (StreamProvider<SessionState>)
 |----------|----------|
 | Host creates group order | Join code generated, host enters cart screen |
 | Participant joins via code | Sees empty cart, participant list with host |
-| User adds item | Appears instantly on all devices with attribution badge |
-| Two users edit same line's quantity concurrently | Last writer wins; loser gets `VERSION_CONFLICT`, retries |
+| User adds item | Appears instantly on all devices with attribution/ownership badge; steppers only on owner's device |
+| Two users add same menu item | Two separate lines (`item:host`, `item:guest`), no conflict |
+| Two users race on same owner's line | Last writer wins; loser gets `VERSION_CONFLICT`, retries |
 | User takes last stock | Other users see "Out of Stock" immediately |
 | User removes item | Stock released, others can add again |
 | Participant toggles Ready | All devices update status in real time |

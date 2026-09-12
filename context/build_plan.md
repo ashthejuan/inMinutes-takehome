@@ -37,10 +37,10 @@ Implement per-session + per-item mutex queue (PRD §9): `sessionReservationQueue
 Client reads initial `version` with state (from `/api/sessions/:id/state` or socket join). Every mutation sends `baseVersion`. Server compares `baseVersion` vs current `version`: match → apply + INCR version + broadcast; mismatch → reject with `VERSION_CONFLICT` + `currentVersion` + `currentState`. Frontend on conflict: merge `currentState`, preserve scroll via `key: ValueKey(itemId)`, retry pending mutation (PRD §276-277).
 
 ### Concurrent-Edit Test Pass
-**Test coverage:** Two clients editing the same line simultaneously, verifying conflict/retry behavior end-to-end. Confirm that the last writer wins and the loser receives `VERSION_CONFLICT`, applies `currentState`, and retries the pending mutation without interrupting scroll position.
+**Test coverage:** Two clients editing the same owner line simultaneously (same `addedBy`), verifying conflict/retry behavior end-to-end. Confirm that the last writer wins and the loser receives `VERSION_CONFLICT`, applies `currentState`, and retries the pending mutation without interrupting scroll position. (Different owners adding the same menu item create separate per-user lines — no conflict.)
 
-### Item Attribution
-Every cart line stores `addedBy` userId (display-only, PRD §97: "addedBy is display-only attribution, not a permission check"). Frontend: badge showing who added each item (PRD §320, §327-328). On `cart:sync`, update `addedBy` display if item changed hands. UI: `[-]` `[qty]` `[+]` controls with attribution badge left of item name (PRD §327-328).
+### Item Attribution (per-user ownership — diverged from display-only request)
+Every cart line is keyed `(itemId, addedBy)` and owned by its adder (PRD §5.3 #1): each participant mutates only their own line; steppers render only on own lines. Original request was shared lines with display-only `addedBy`; per-user lines won for the reasons in PRD §5.3 #1 (no griefing, clearer "my qty vs theirs", cheaper than shared-qty merge). Frontend: badge showing who added each item (PRD §320, §327-328). On `cart:sync`, update `addedBy` display if item changed hands. UI: `[-]` `[qty]` `[+]` controls only on own lines; others' lines show static qty with attribution badge.
 
 ---
 
@@ -53,7 +53,7 @@ Participant toggles "Ready" button → sends `user:ready {ready: boolean}`. Serv
 Server validates `checkout` event caller == `session.hostId`. On non-host checkout: broadcast `error { code: 'ONLY_HOST_CAN_CHECKOUT' }`, disable button for non-host (PRD §419, §220-221). Frontend: non-host clicking Place Order shows error, button stays disabled. Host clicking Place Order when not all ready: broadcast `error { code: 'NOT_ALL_READY' }`, show who isn't ready (PRD §418, §221-222).
 
 ### Order Persistence & Session Cleanup
-Host checkout → convert in-memory reservations to confirmed stock decrement in SQLite. Create `orders` record + `order_items` with `added_by` attribution (PRD §11, §166-175). Session status → `completed`, clean up in-memory state (TTL 30 min, PRD §372-373). Broadcast `session:checkout { orderId }` to all clients. Frontend: navigate to `/order/:orderId/success`, show confirmation.
+Host checkout → convert in-memory reservations to confirmed stock decrement in SQLite. Create `orders` record + `order_items` with `added_by` attribution (PRD §11, §166-175). Session status → `completed`, clean up in-memory state (30-min sliding idle TTL, PRD §15 #4). Broadcast `session:checkout { orderId }` to all clients. Frontend: navigate to `/order/:orderId/success`, show confirmation.
 
 ---
 
@@ -62,8 +62,8 @@ Host checkout → convert in-memory reservations to confirmed stock decrement in
 ### Host Transfer on Disconnect
 Server: on socket disconnect, check if disconnecting user is host. If host: find connected participant with earliest `joined_at`, promote to host. Broadcast `host:changed { hostId }` to all participants in room. Frontend: `host:changed` event updates participant list host badge, checkout eligibility. Test: host disconnects → new host takes over, all functionality continues.
 
-### Session Expiry
-30-min inactivity TTL: server cleans in-memory state after no socket activity. SQLite audit remains (orders, sessions, participants - PRD §372). Frontend: joining expired session shows error, redirects to home.
+### Session Expiry (30-min sliding idle TTL — FR-13)
+Sliding deadline `expires_at = last_activity + 30 min` (`SESSION_TTL_SECONDS`, overridable via env): REST joins, socket joins, cart mutations, and ready toggles slide it via `touchSession` (after the expiry check, so touches never resurrect dead sessions); read-only `GET /:id/state` deliberately does not. Server drops in-memory state via periodic sweep + opportunistic expiry on touch. SQLite audit remains (orders, sessions, participants - PRD §15 #4). Frontend: joining expired session shows error, redirects to home. (Was: fixed `created_at + 24h` deadline — replaced; see `context/architecture/session-ttl-touch.md`.)
 
 ### Error Handling & UX Polish
 All error codes handled UI-wise (PRD §418-421). `ListView.builder` with `key: ValueKey(itemId)` preserves scroll position on targeted updates (PRD §351). Subtotal calculation and display (PRD §334). **Menu browsing with categories and stock display removed from this section** — covered in Phase 0 frontend setup. **Backend deployed to Railway (or equivalent)** — persistent volume for SQLite file configured, env vars set, `/health` endpoint verified reachable from external network. APK connects to this pre-deployed backend.
@@ -106,7 +106,7 @@ All error codes handled UI-wise (PRD §418-421). `ListView.builder` with `key: V
 - No authentication — sessions identified by join code only (PRD §369)
 - Single kitchen/menu — no multi-restaurant logic (PRD §370)
 - Global stock shared across all sessions; reservations prevent oversell (PRD §371)
-- Session TTL — 30 min inactivity → auto-expire (PRD §372)
+- Session TTL — 30-min sliding idle deadline (`expires_at = last_activity + 30 min`; joins / cart mutations / ready toggles slide it, reads don't) → auto-expire (PRD §15 #4)
 - No payments — checkout creates order record only (PRD §373)
 - One active session per user (PRD §374)
 - Single backend replica — SQLite single-writer; in-memory requires single process (PRD §375)
@@ -123,7 +123,7 @@ All error codes handled UI-wise (PRD §418-421). `ListView.builder` with `key: V
 | Host creates group order | Join code generated, host enters cart screen |
 | Participant joins via code | Sees empty cart, participant list with host |
 | User adds item | Appears instantly on all devices with attribution badge |
-| Two users edit same line's quantity concurrently | Last writer wins; loser gets VERSION_CONFLICT, retries |
+| Two users add the same menu item concurrently | Two per-user lines appear (one per owner); same-owner concurrent edits → last writer wins, loser retries |
 | User takes last stock | Other users see "Out of Stock" immediately |
 | User removes item | Stock released, others can add again |
 | Participant toggles Ready | All devices update status in real time |
@@ -131,6 +131,6 @@ All error codes handled UI-wise (PRD §418-421). `ListView.builder` with `key: V
 | Host clicks Place Order (not all ready) | Error NOT_ALL_READY, button stays disabled |
 | Non-host clicks Place Order | Error ONLY_HOST_CAN_CHECKOUT |
 | Host disconnects | Role transfers to earliest-joined connected participant; host:changed broadcast |
-| Session idle 30 min | Expires, data cleaned from memory, SQLite audit remains |
+| Session idle 30 min (no joins / mutations / ready toggles) | Expires, data cleaned from memory, SQLite audit remains |
 
 ---

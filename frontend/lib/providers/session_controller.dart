@@ -33,6 +33,12 @@ class SessionController {
     // Phase 4: host transfer + TTL expiry (PRD §5.3 #6, §15 #4).
     _socket.onHostChanged(_handleHostChanged);
     _socket.onSessionExpired(_handleSessionExpired);
+    // Transport reconnect (lock / WiFi drop / background): SessionSocket
+    // already re-emitted `session:join` and the server replayed full state —
+    // just tell the user the view is fresh again.
+    _socket.onReconnected = () {
+      onErrorMessage?.call('RECONNECTED', 'Back online — cart re-synced');
+    };
   }
 
   final Ref _ref;
