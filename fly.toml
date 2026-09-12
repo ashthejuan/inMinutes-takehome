@@ -1,0 +1,31 @@
+app = 'inminutes-takehome'
+primary_region = 'bom'
+
+[build]
+  dockerfile = 'backend/Dockerfile'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+  [[http_service.checks]]
+    grace_period = '10s'
+    interval = '15s'
+    method = 'GET'
+    path = '/health'
+    timeout = '2s'
+
+[[vm]]
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256
+
+[env]
+  PORT = '3000'
+  FRONTEND_URL = 'http://localhost:8080'
+  SESSION_TTL_SECONDS = '1800'
+  SESSION_SWEEP_INTERVAL_MS = '60000'
