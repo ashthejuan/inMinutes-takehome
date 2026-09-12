@@ -32,17 +32,108 @@ class _CollaborativeCartScreenState
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       final controller = ref.read(sessionControllerProvider);
       controller.onCheckout = (orderId) {
         if (mounted) context.go('/order/$orderId/success');
       };
       controller.onErrorMessage = (code, message) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(SnackBar(content: Text('$code: $message')));
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(content: Text('$code: $message')));
+        });
       };
+      controller.onNeedsJoin = (sessionId, joinCode) {
+        _promptJoin(sessionId, joinCode);
+      };
+      controller.ensureJoined(widget.sessionId);
     });
+  }
+
+  @override
+  void dispose() {
+    final controller = ref.read(sessionControllerProvider);
+    controller.onCheckout = null;
+    controller.onErrorMessage = null;
+    controller.onNeedsJoin = null;
+    super.dispose();
+  }
+
+  Future<void> _promptJoin(String sessionId, String? joinCode) async {
+    if (!mounted) return;
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Join Group Order'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          maxLength: 50,
+          decoration: const InputDecoration(
+            labelText: 'Your display name',
+            border: OutlineInputBorder(),
+            counterText: '',
+          ),
+          onSubmitted: (v) {
+            final t = v.trim();
+            if (t.isNotEmpty) Navigator.of(context).pop(t);
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final t = controller.text.trim();
+              if (t.isNotEmpty) Navigator.of(context).pop(t);
+            },
+            child: const Text('Join'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (!mounted) return;
+    if (name == null || name.isEmpty) {
+      context.go('/');
+      return;
+    }
+    try {
+      final code = joinCode;
+      if (code != null && code.isNotEmpty) {
+        final joined = await ref.read(apiClientProvider).joinSession(
+              joinCode: code,
+              displayName: name,
+            );
+        final sid =
+            (joined['sessionId'] ?? joined['session_id'])?.toString() ??
+                sessionId;
+        final uid =
+            (joined['userId'] ?? joined['user_id'])?.toString() ?? '';
+        ref.read(sessionControllerProvider).enterSession(
+              sessionId: sid,
+              userId: uid,
+              joinCode: code,
+              displayName: name,
+            );
+      } else {
+        context.go('/group/join');
+      }
+    } catch (err) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('$err')));
+      context.go('/');
+    }
   }
 
   String _formatPaise(int paise) => '₹${(paise / 100).toStringAsFixed(0)}';
@@ -121,6 +212,7 @@ class _CollaborativeCartScreenState
             child: const Padding(
               padding: EdgeInsets.symmetric(horizontal: 12),
               child: Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(Icons.group_outlined),
                   SizedBox(width: 4),

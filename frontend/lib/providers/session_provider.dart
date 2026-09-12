@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../data/services/session_storage.dart';
+
 /// Active group session identity (REST create/join + socket room).
 class SessionState {
   const SessionState({
@@ -23,6 +25,26 @@ class SessionState {
   bool get isHost =>
       isInSession && hostId != null && userId != null && hostId == userId;
 
+  Map<String, dynamic> toJson() => {
+        if (sessionId != null) 'sessionId': sessionId,
+        if (joinCode != null) 'joinCode': joinCode,
+        if (userId != null) 'userId': userId,
+        if (hostId != null) 'hostId': hostId,
+        if (displayName != null) 'displayName': displayName,
+        'version': version,
+      };
+
+  factory SessionState.fromJson(Map<String, dynamic> json) {
+    return SessionState(
+      sessionId: json['sessionId'] as String?,
+      joinCode: json['joinCode'] as String?,
+      userId: json['userId'] as String?,
+      hostId: json['hostId'] as String?,
+      displayName: json['displayName'] as String?,
+      version: (json['version'] as num?)?.toInt() ?? 0,
+    );
+  }
+
   SessionState copyWith({
     String? sessionId,
     String? joinCode,
@@ -43,14 +65,21 @@ class SessionState {
 }
 
 class SessionNotifier extends StateNotifier<SessionState> {
-  SessionNotifier() : super(const SessionState());
+  SessionNotifier()
+      : super(SessionStorageService.loadSession() ?? const SessionState());
 
   void setSession(SessionState next) {
     state = next;
+    if (next.isInSession) {
+      SessionStorageService.saveSession(next);
+    } else {
+      SessionStorageService.clearSession();
+    }
   }
 
   void clear() {
     state = const SessionState();
+    SessionStorageService.clearSession();
   }
 }
 

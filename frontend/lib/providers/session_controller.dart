@@ -2,7 +2,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../config.dart';
 import '../../data/services/session_socket.dart';
+import '../../data/services/session_storage.dart';
 import 'cart_provider.dart';
+import 'menu_provider.dart';
 import 'participants_provider.dart';
 import 'session_provider.dart';
 
@@ -39,6 +41,14 @@ class SessionController {
     _socket.onReconnected = () {
       onErrorMessage?.call('RECONNECTED', 'Back online — cart re-synced');
     };
+
+    // If an active session was already loaded (e.g. from sessionStorage on page refresh),
+    // automatically open the socket and rejoin the session room.
+    final session = _ref.read(sessionProvider);
+    if (session.isInSession && session.sessionId != null && session.userId != null) {
+      _socket.connect();
+      _socket.join(session.sessionId!, session.userId!);
+    }
   }
 
   final Ref _ref;
@@ -50,6 +60,9 @@ class SessionController {
 
   /// Set by the cart screen: show a SnackBar for gate/stock errors.
   void Function(String code, String message)? onErrorMessage;
+
+  /// Set by the cart screen: prompt for name if deep-linking into an unjoined session.
+  void Function(String sessionId, String? joinCode)? onNeedsJoin;
 
   /// Socket.io on Flutter web often delivers JSON numbers as [double], not [int].
   static int? _asInt(dynamic value) {
@@ -138,6 +151,39 @@ class SessionController {
     _socket.checkout(sessionId: sessionId, userId: userId);
   }
 
+  /// Ensure that the socket is connected and in the room for [sessionId].
+  /// Used by CollaborativeCartScreen on mount / browser refresh.
+  Future<void> ensureJoined(String sessionId) async {
+    if (sessionId.isEmpty) return;
+    var session = _ref.read(sessionProvider);
+    if (!session.isInSession || session.sessionId != sessionId) {
+      final saved = SessionStorageService.loadSession();
+      if (saved != null && saved.sessionId == sessionId && saved.userId != null) {
+        _ref.read(sessionProvider.notifier).setSession(saved);
+        session = saved;
+      }
+    }
+
+    if (session.sessionId == sessionId && session.userId != null) {
+      _socket.connect();
+      _socket.join(session.sessionId!, session.userId!);
+      return;
+    }
+
+    // No local identity for this session (e.g. opened direct link without joining).
+    // Verify session existence on backend and trigger join flow if active.
+    try {
+      final state = await _ref.read(apiClientProvider).fetchSessionState(sessionId);
+      final rawSession = state['session'];
+      final joinCode = (rawSession is Map)
+          ? (rawSession['join_code'] ?? rawSession['joinCode'])?.toString()
+          : null;
+      onNeedsJoin?.call(sessionId, joinCode);
+    } catch (_) {
+      onErrorMessage?.call('SESSION_NOT_FOUND', 'Session not found or expired');
+    }
+  }
+
   /// After REST create/join: persist identity, open the socket room, and
   /// seed a local participant row until `participants:sync` arrives.
   void enterSession({
@@ -219,6 +265,7 @@ class SessionController {
       final map = Map<String, dynamic>.from(payload);
       final orderId = map['orderId'] ?? map['order_id'];
       if (orderId is String && orderId.isNotEmpty) {
+        _ref.read(sessionProvider.notifier).clear();
         onCheckout?.call(orderId);
       }
     }
@@ -255,6 +302,7 @@ class SessionController {
   /// Phase 4: `session:expired` (+ `error SESSION_EXPIRED`) — surface and
   /// let the screen navigate home.
   void _handleSessionExpired(dynamic payload) {
+    _ref.read(sessionProvider.notifier).clear();
     onErrorMessage?.call('SESSION_EXPIRED', 'Session expired');
   }
 

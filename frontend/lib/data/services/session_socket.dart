@@ -25,7 +25,10 @@ class SessionSocket {
   bool get isConnected => _socket?.connected ?? false;
 
   void connect() {
-    disconnect();
+    if (_socket != null && isConnected) return;
+    _socket?.disconnect();
+    _socket?.dispose();
+    _socket = null;
     _socket = io.io(
       baseUrl,
       io.OptionBuilder().setTransports(['websocket']).disableAutoConnect().build(),

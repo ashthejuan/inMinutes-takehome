@@ -21,6 +21,18 @@ class MenuScreen extends ConsumerStatefulWidget {
 class _MenuScreenState extends ConsumerState<MenuScreen> {
   bool _creating = false;
 
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final session = ref.read(sessionProvider);
+      if (session.isInSession && session.sessionId != null) {
+        ref.read(sessionControllerProvider).ensureJoined(session.sessionId!);
+      }
+    });
+  }
+
   Future<String?> _askHostName() async {
     final controller = TextEditingController();
     final name = await showDialog<String>(

@@ -66,6 +66,15 @@ class ApiClient {
     return _requireMap(response.body);
   }
 
+  Future<Map<String, dynamic>> fetchSessionState(String sessionId) async {
+    final uri = Uri.parse('$_baseUrl/api/sessions/$sessionId/state');
+    final response = await _client.get(uri);
+    if (response.statusCode != 200) {
+      throw Exception(_errorMessage(response, 'Failed to fetch session state'));
+    }
+    return _requireMap(response.body);
+  }
+
   Future<bool> healthCheck() async {
     final uri = Uri.parse('$_baseUrl/health');
     final response = await _client.get(uri);

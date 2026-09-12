@@ -9,16 +9,17 @@ void main() {
   runApp(const ProviderScope(child: FoodOrderApp()));
 }
 
-class FoodOrderApp extends StatelessWidget {
+class FoodOrderApp extends ConsumerWidget {
   const FoodOrderApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final router = ref.watch(routerProvider);
     return MaterialApp.router(
       title: 'inMinutes Order',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
-      routerConfig: appRouter,
+      routerConfig: router,
     );
   }
 }

@@ -467,15 +467,17 @@ async function buildServer(options = {}) {
       if (socket.data.userId) {
         let name;
         let isHost = socket.data.userId === session.host_id;
+        let joinedAt = Date.now();
         try {
           const row = getDb()
             .prepare(
-              'SELECT display_name, is_host FROM session_participants WHERE session_id = ? AND user_id = ?'
+              'SELECT display_name, is_host, joined_at FROM session_participants WHERE session_id = ? AND user_id = ?'
             )
             .get(session.id, socket.data.userId);
           if (row) {
             name = row.display_name;
             isHost = row.is_host === 1;
+            if (row.joined_at) joinedAt = row.joined_at;
           }
         } catch {
           // Ephemeral fallback below.
@@ -483,7 +485,7 @@ async function buildServer(options = {}) {
         participants.ensureParticipant(session.id, socket.data.userId, {
           name: name ?? socket.data.userId,
           isHost,
-          joinedAt: Date.now(),
+          joinedAt,
         });
         trackConnect(session.id, socket.data.userId);
       }
