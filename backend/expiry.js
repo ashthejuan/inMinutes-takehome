@@ -1,14 +1,20 @@
 /**
- * Phase 4 — Session TTL sweep (PRD §5.3, §7.1, §15 #4).
+ * Phase 4 — Session TTL sweep (PRD §5.3, §7.1, §15 #4) + idle touch (FR-13).
  *
- * `group_sessions.expires_at = created_at + 24h` is the durable deadline.
- * This module marks past-deadline `active` sessions `expired` in SQLite and
- * drops their ephemeral state (cart + reservations + live ready-gate) so
- * memory never grows unboundedly. SQLite audit rows (sessions, participants,
- * orders) remain for history.
+ * `group_sessions.expires_at` is a *sliding* deadline: `last_activity + TTL`.
+ * Every join / cart mutation / ready toggle bumps it via `touchSession`, so
+ * a session only expires after 30 min of true inactivity. Read-only
+ * `GET /:id/state` never touches (polling must not keep a dead session alive).
+ * Expiry marks past-deadline `active` sessions `expired` in SQLite and drops
+ * their ephemeral state (cart + reservations + live ready-gate) so memory
+ * never grows unboundedly. SQLite audit rows (sessions, participants, orders)
+ * remain for history.
  *
  * ponytail: single-replica in-memory cleanup; external store if scaled out.
  */
+
+// PRD FR-13: 30 min inactivity. Overridable via env for tests/demos.
+const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS) || 30 * 60;
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
@@ -44,6 +50,23 @@ function dropEphemeralState(sessionId) {
 }
 
 /**
+ * Bump a live session's sliding deadline (`expires_at = now + TTL`).
+ * Call AFTER the expiry check passes, on user activity (join, cart mutation,
+ * ready toggle). No-op for completed/expired/past-deadline sessions — touch
+ * must never resurrect a dead session. Mutates the passed row's `expires_at`
+ * so callers see the fresh deadline.
+ * @returns {number|null} the new `expires_at`, or null when not touched.
+ */
+function touchSession(database, session) {
+  if (!session || session.status !== 'active') return null;
+  if (Number(session.expires_at) <= nowSeconds()) return null;
+  const next = nowSeconds() + SESSION_TTL_SECONDS;
+  database.prepare('UPDATE group_sessions SET expires_at = ? WHERE id = ?').run(next, session.id);
+  session.expires_at = next;
+  return next;
+}
+
+/**
  * Periodic sweep: expire every past-deadline `active` session.
  * @param {{ io?: import('socket.io').Server }} [deps] — when `io` is given,
  *   each expired room gets `session:expired` + `error{SESSION_EXPIRED}`.
@@ -75,4 +98,4 @@ function sweepExpiredSessions(deps = {}) {
   return ids;
 }
 
-module.exports = { nowSeconds, isSessionExpired, expireSessionIfNeeded, dropEphemeralState, sweepExpiredSessions };
+module.exports = { nowSeconds, SESSION_TTL_SECONDS, isSessionExpired, expireSessionIfNeeded, touchSession, dropEphemeralState, sweepExpiredSessions };

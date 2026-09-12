@@ -12,12 +12,12 @@ const participants = require('./participants');
 const { performCheckout } = require('./checkout');
 // Phase 4: standardized errors + TTL sweep (PRD §8.3, §15 #4).
 const { emitError, restError } = require('./errors');
-const { expireSessionIfNeeded, sweepExpiredSessions } = require('./expiry');
+const { expireSessionIfNeeded, sweepExpiredSessions, touchSession, SESSION_TTL_SECONDS } = require('./expiry');
 
 const PORT = Number(process.env.PORT) || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:8080';
 
-const SESSION_TTL_SECONDS = 24 * 60 * 60; // 24h
+// SESSION_TTL_SECONDS comes from ./expiry (30-min sliding idle TTL, FR-13).
 // Phase 4: periodic TTL sweep interval (overridable for tests via options).
 const SWEEP_INTERVAL_MS = Number(process.env.SESSION_SWEEP_INTERVAL_MS) || 60 * 1000;
 const JOIN_CODE_LENGTH = 6;
@@ -220,6 +220,8 @@ async function buildServer(options = {}) {
       const message = code === 'SESSION_COMPLETED' ? 'Session already checked out' : 'Session expired';
       return restError(reply, 410, code, message);
     }
+    // FR-13 idle TTL: a join is activity — slide the deadline.
+    touchSession(database, session);
 
     const userId = nanoid(12);
     const displayName = parsed.data.display_name ?? defaultGuestName(userId);
@@ -267,6 +269,8 @@ async function buildServer(options = {}) {
       return restError(reply, 404, 'SESSION_NOT_FOUND', 'Session not found');
     }
     // Phase 4: expired sessions answer 410 (audit rows remain in SQLite).
+    // NOTE: read-only state fetch never touches the idle deadline (FR-13) —
+    // polling must not keep a dead session alive.
     if (expireSessionIfNeeded(database, session) || session.status === 'expired') {
       return restError(reply, 410, 'SESSION_EXPIRED', 'Session expired');
     }
@@ -446,6 +450,8 @@ async function buildServer(options = {}) {
         if (typeof ack === 'function') ack({ ok: false, code, message });
         return;
       }
+      // FR-13 idle TTL: joining the room is activity — slide the deadline.
+      touchSession(getDb(), session);
       const prevSessionId = socket.data.sessionId;
       const prevUserId = socket.data.userId;
       if (prevSessionId && prevSessionId !== session.id) {
@@ -546,6 +552,8 @@ async function buildServer(options = {}) {
         if (typeof ack === 'function') ack({ ok: false, code, message });
         return;
       }
+      // FR-13 idle TTL: a ready toggle is activity — slide the deadline.
+      touchSession(getDb(), session);
       if (socket.data.sessionId && socket.data.sessionId !== session.id) {
         socket.leave(socket.data.sessionId);
         detachFromSession(socket.data.sessionId, socket.data.userId);
@@ -605,6 +613,9 @@ async function buildServer(options = {}) {
         if (typeof ack === 'function') ack({ ok: false, code, message });
         return;
       }
+      // FR-13 idle TTL: a cart mutation attempt is activity — slide the
+      // deadline before applying (pass or fail, the user is clearly here).
+      touchSession(getDb(), session);
       // Prefer socket identity so clients can't mutate another user's line.
       const addedBy = socket.data.userId ?? body.addedBy ?? body.added_by ?? null;
       const result = await applyMutation(session.id, {
