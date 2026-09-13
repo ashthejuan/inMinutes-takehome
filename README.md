@@ -4,6 +4,18 @@ Real-time group food ordering platform built with a Node.js Fastify backend, SQL
 
 The application supports solo ordering and collaborative group orders. In a group order, multiple users join a shared cart through a six-character join code, update items concurrently, view per-user attribution badges, and check out when all participants mark themselves ready.
 
+## Demo / Sync Explanation Video (~8 min)
+
+[Watch on YouTube (unlisted): architecture + frontend/backend code walkthrough + solo and group order demo](https://youtu.be/_xs7uZ2mvCo)
+
+The video covers how the sync logic is architected (in-memory atomic stock reservation, OCC with `baseVersion`, Socket.io room broadcasts, all-ready gate), walks through the key frontend and backend code, and demos a single-user order and a multi-tab group order.
+
+## Live Deployment
+
+- **Backend (Fly.io):** `https://inminutes-takehome.fly.dev` — health probe: `GET /health` → `{ ok: true }`.
+- The Flutter app defaults to this URL (see `frontend/lib/config.dart`), so the submitted APK works without running a local backend. Note: Fly.io free-tier machines sleep when idle, so the first request after inactivity can take ~10s to wake.
+- For local development, override with `--dart-define=API_BASE_URL=http://localhost:3000` (web) or `http://10.0.2.2:3000` (Android emulator).
+
 ---
 
 ## Architecture
@@ -86,16 +98,26 @@ Sessions use a sliding inactivity window rather than a static lifetime:
 
 ## Tech Stack
 
-| Layer | Technology | Version | Justification |
+| Layer | Technology | Version (tested) | Justification |
 |---|---|---|---|
-| **Backend Runtime** | Node.js | >= 20.0.0 | Native test runner, ESM and CJS compatibility, LTS stability. |
+| **Backend Runtime** | Node.js | `v22.18.0` (>= 20.0.0 required) | Native test runner, ESM and CJS compatibility, LTS stability. |
+| **Package Manager** | npm | `10.9.3` (>= 10 required) | Lockfile reproducibility for backend deps. |
 | **Backend Framework** | Fastify | ^5.12.3 | Low overhead, native schema validation hooks, fast request throughput. |
-| **Real-Time Transport** | Socket.io | ^4.8.3 | Room multiplexing, heartbeat timeouts, automatic transport fallback. |
+| **CORS** | @fastify/cors | ^11.3.0 | Allow web frontend (`localhost:8080`/deployed origin) to call REST + Socket.io during local multi-tab testing. |
+| **Real-Time Transport** | Socket.io (server) | ^4.8.3 | Room multiplexing (`sessionId` rooms), heartbeat timeouts, automatic transport fallback. |
+| **Real-Time Client** | socket_io_client (Flutter) / socket.io-client (Node dev) | ^3.1.6 / ^4.8.3 | Same room/reconnect protocol on mobile and in backend integration tests. |
 | **Database** | SQLite via `better-sqlite3` | ^13.0.3 | Synchronous file-based queries, WAL mode concurrency, zero network latency. |
 | **Validation** | Zod | ^4.6.1 | Type-safe schema validation for REST payloads and socket messages. |
-| **Mobile Framework** | Flutter / Dart | >= 3.27 / ^3.6.0 | Cross-platform compilation, responsive layouts, declarative UI. |
-| **State Management** | Riverpod | ^2.6.1 | Compile-safe state graphs, auto-disposal, fine-grained selector rebuilds. |
+| **IDs** | nanoid | ^6.0.1 | Collision-resistant session/user IDs and 6-char join codes. |
+| **Env Config** | dotenv | ^17.4.2 | `PORT`, `FRONTEND_URL`, `SESSION_TTL_SECONDS` without hardcoding. |
+| **Mobile Framework** | Flutter / Dart | `3.27.1` / `3.6.0` (requires Flutter >= 3.27 / Dart ^3.6.0) | Cross-platform compilation, responsive layouts, declarative UI. |
+| **State Management** | Riverpod (flutter_riverpod) | ^2.6.1 | Compile-safe state graphs, auto-disposal, fine-grained selector rebuilds to avoid scroll-jank on `cart:sync`. |
 | **Navigation** | GoRouter | ^16.1.0 | Declarative URL-based routing, deep link handling, scoped navigation state. |
+| **REST Client** | http | ^1.6.0 | Simple typed calls for `/api/menu` and `/api/sessions/*`. |
+| **Images** | cached_network_image | ^3.4.1 | Disk/memory caching for menu images so live cart rebuilds don't refetch. |
+| **Models** | freezed_annotation + json_annotation (+ freezed/json_serializable dev) | ^3.1.0 / ^4.9.0 | Immutable session/cart models with codegen serialization. |
+| **Icons** | cupertino_icons | ^1.0.8 | iOS-style icons dependency required by Flutter template. |
+| **Build** | Android Gradle Plugin / Gradle / Java | `8.2.1` / `8.3` / Java 21 (Android Studio JBR) | Must be AGP >= 8.2.1: older AGP fails on Java 21+ with `JdkImageTransform/jlink` error in `:path_provider_android`. |
 
 ---
 
@@ -183,9 +205,10 @@ Sessions use a sliding inactivity window rather than a static lifetime:
 ## Setup and Running
 
 ### Prerequisites
-- Node.js 20 or higher
-- npm 10 or higher
-- Flutter SDK 3.27 or higher
+- Node.js `v22.18.0` (requires >= 20.0.0)
+- npm `10.9.3` (requires >= 10)
+- Flutter `3.27.1` / Dart `3.6.0` (requires Flutter >= 3.27 / Dart ^3.6.0) — verify with `flutter --version`
+- For APK builds: JDK 17+ and Android SDK with `android-35` platform (repo uses AGP `8.2.1` + Gradle `8.3`, verified with Android Studio JBR Java 21 — see [Building the APK](#building-the-apk))
 
 ### 1. Backend Service
 
@@ -255,6 +278,26 @@ To connect physical devices on your local Wi-Fi:
 ```bash
 flutter run --dart-define=API_BASE_URL=http://<YOUR_LOCAL_IP>:3000
 ```
+
+### Building the APK
+
+The submitted APK is pre-configured to hit the Fly.io backend, so reviewers don't need a local server. `frontend/lib/config.dart` defaults to `https://inminutes-takehome.fly.dev`; pass `--dart-define` explicitly to be safe.
+
+```powershell
+# From repo root: wake backend first (cold start ~10s)
+curl https://inminutes-takehome.fly.dev/health
+
+cd frontend
+flutter pub get
+
+# IMPORTANT: repo must use AGP >= 8.2.1 (see `frontend/android/settings.gradle`).
+# Older AGP 8.1.0 fails on Java 21+ with `JdkImageTransform ... jlink.exe` /
+# `:path_provider_android:compileReleaseJavaWithJavac`. Fixed by bumping AGP 8.1.0 → 8.2.1.
+flutter build apk --debug --dart-define=API_BASE_URL=https://inminutes-takehome.fly.dev
+# Output: build/app/outputs/flutter-apk/app-debug.apk
+```
+
+Use `--debug` for submission (allowed: "debug or release build for testing"). For a smaller artifact, replace `--debug` with `--release` (release is signed with debug keys in `android/app/build.gradle`, so it installs without a Play Store keystore). Rename e.g. to `inminutes-debug.apk` before emailing. If Gmail blocks the attachment, share a Drive link.
 
 ---
 
